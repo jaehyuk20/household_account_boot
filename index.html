@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>모아봐요 가계부</title>
+    <meta name="description" content="픽셀 섬에서 수입과 지출을 기록하는 가계부" />
+    <meta name="theme-color" content="#8fd8f7" />
+    <link rel="preload" href="fonts/Galmuri14.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="fonts/Galmuri11-Bold.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="css/style.css" />
+    <script>
+      // 저장해 둔 낮/밤 선택을 첫 화면부터 적용합니다
+      try {
+        var t = localStorage.getItem('moa-theme');
+        if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div class="scene" aria-hidden="true">
+      <div class="stars"></div>
+      <div class="celestial"><i class="sun"></i><i class="moon"></i></div>
+      <div class="clouds"></div>
+      <div class="sea"></div>
+      <div class="land">
+        <div class="hills"></div>
+        <div class="ground"></div>
+        <div class="props"></div>
+      </div>
+    </div>
+    <canvas id="ambient" class="fx-canvas" aria-hidden="true"></canvas>
+
+    <noscript>
+      <p class="noscript px">이 가계부는 자바스크립트로 움직여요. 브라우저에서 자바스크립트를 켜 주세요.</p>
+    </noscript>
+
+    <main class="app" id="app">
+      <header class="topbar">
+        <h1 class="brand"><img data-sprite="leaf" data-scale="2" alt="" />모아봐요 가계부</h1>
+        <button class="icon-btn px px-l" id="theme-btn" type="button" aria-label="밤 풍경으로 바꾸기">
+          <img data-sprite="moon" data-scale="2" alt="" />
+        </button>
+      </header>
+
+      <section class="card px hero" aria-labelledby="month-title">
+        <div class="month-bar px px-l dotted">
+          <button class="nav-btn px px-m" type="button" data-dir="-1" aria-label="이전 달">
+            <img data-sprite="arrowL" data-scale="2" alt="" />
+          </button>
+          <h2 class="month-label" id="month-title" aria-live="polite"></h2>
+          <button class="nav-btn px px-m" type="button" data-dir="1" aria-label="다음 달">
+            <img data-sprite="arrowR" data-scale="2" alt="" />
+          </button>
+        </div>
+
+        <div class="balance">
+          <p class="label" id="balance-label">이번 달 남은 돈</p>
+          <p class="balance-num" id="balance">
+            <span class="sign" aria-hidden="true"></span><span class="odo" aria-hidden="true"></span
+            ><span class="won" aria-hidden="true">원</span><span class="sr-only" id="balance-sr"></span>
+          </p>
+        </div>
+
+        <div class="io">
+          <div class="io-item in px px-l">
+            <img data-sprite="pouch" data-scale="2" alt="" />
+            <span class="label">수입</span>
+            <span class="val" id="sum-in">0원</span>
+          </div>
+          <div class="io-item out px px-l">
+            <img data-sprite="basket" data-scale="2" alt="" />
+            <span class="label">지출</span>
+            <span class="val" id="sum-out">0원</span>
+          </div>
+        </div>
+
+        <div class="meter-wrap">
+          <div class="meter px" id="meter" role="meter" aria-label="수입 대비 지출" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="meter-fill px" id="meter-fill"></div>
+          </div>
+          <p class="meter-note" id="meter-note"></p>
+        </div>
+      </section>
+
+      <section class="talk" aria-label="다람쥐 토리의 한마디">
+        <button class="tori" id="tori" type="button" aria-label="토리 쓰다듬기"></button>
+        <button class="bubble px" id="bubble" type="button">
+          <span class="bubble-tail" aria-hidden="true"></span>
+          <span class="name-tag px" aria-hidden="true">토리</span>
+          <span class="talk-text" id="talk-text" aria-hidden="true"></span>
+          <span class="talk-next" aria-hidden="true"></span>
+          <span class="sr-only">토리의 다음 말 듣기</span>
+        </button>
+        <p class="sr-only" id="talk-live" aria-live="polite"></p>
+      </section>
+
+      <div class="sample-note px" id="sample-note" hidden>
+        <img data-sprite="sprout" data-scale="2" alt="" />
+        <p>지금 보이는 기록은 둘러보기용 예시예요. 내 기록만 남기려면 예시를 지워 주세요.</p>
+        <button class="btn btn-small px" id="clear-samples" type="button">예시 지우기</button>
+      </div>
+
+      <div class="tabs px" role="tablist" aria-label="보기">
+        <span class="tab-thumb px" aria-hidden="true"></span>
+        <button class="tab" role="tab" type="button" id="tab-list" aria-selected="true" aria-controls="panel-list">내역</button>
+        <button class="tab" role="tab" type="button" id="tab-stats" aria-selected="false" aria-controls="panel-stats" tabindex="-1">통계</button>
+      </div>
+
+      <section class="card px panel" id="panel-list" role="tabpanel" aria-labelledby="tab-list">
+        <div class="panel-inner" id="list"></div>
+        <div class="empty" id="empty" hidden>
+          <img data-sprite="sprout" data-scale="3" alt="" />
+          <p class="empty-title">이 달에는 아직 기록이 없어요</p>
+          <p class="empty-sub">아래 나뭇잎 버튼을 눌러 첫 기록을 남겨 보세요.</p>
+        </div>
+      </section>
+
+      <section class="card px panel" id="panel-stats" role="tabpanel" aria-labelledby="tab-stats" hidden>
+        <div class="stats-head">
+          <div class="seg px" role="radiogroup" aria-label="통계 종류" data-kind="expense">
+            <span class="seg-thumb px" aria-hidden="true"></span>
+            <label><input type="radio" name="stat-kind" value="expense" checked /><span>지출</span></label>
+            <label><input type="radio" name="stat-kind" value="income" /><span>수입</span></label>
+          </div>
+          <p class="stats-total" id="stats-total"></p>
+        </div>
+        <ol class="bars" id="bars" data-kind="expense"></ol>
+        <div class="empty" id="stats-empty" hidden>
+          <img data-sprite="sprout" data-scale="3" alt="" />
+          <p class="empty-title" id="stats-empty-title">이 달에는 지출 기록이 없어요</p>
+          <p class="empty-sub">기록이 쌓이면 카테고리별로 모아서 보여 드릴게요.</p>
+        </div>
+      </section>
+    </main>
+
+    <div class="fab-wrap">
+      <button class="fab px" id="fab" type="button" aria-label="새 기록 추가" aria-haspopup="dialog" aria-controls="sheet">
+        <img data-sprite="plus" data-scale="3" alt="" />
+      </button>
+      <span class="fab-tip px" aria-hidden="true">기록하기</span>
+      <span class="fab-shadow" aria-hidden="true"></span>
+    </div>
+
+    <div class="sheet-layer" id="sheet-layer" hidden>
+      <div class="iris" id="iris" data-close></div>
+      <form class="sheet px" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" data-type="expense" tabindex="-1" novalidate>
+        <div class="sheet-scroll">
+          <div class="sheet-band px dotted">
+            <img data-sprite="leaf" data-scale="2" alt="" />
+            <h2 id="sheet-title">새 기록</h2>
+            <button class="icon-btn px px-l" type="button" data-close aria-label="닫기">
+              <img data-sprite="close" data-scale="2" alt="" />
+            </button>
+          </div>
+
+          <div class="type-switch px" role="radiogroup" aria-label="기록 종류">
+            <span class="type-thumb px" aria-hidden="true"></span>
+            <label><input type="radio" name="type" value="expense" id="type-expense" checked /><span>지출</span></label>
+            <label><input type="radio" name="type" value="income" id="type-income" /><span>수입</span></label>
+          </div>
+
+          <div class="amount-field" id="amount-field">
+            <label class="field-label" for="amount">금액</label>
+            <div class="amount-box">
+              <div class="amount-view is-empty" id="amount-view" aria-hidden="true">
+                <span class="digits">0</span><span class="caret"></span><span class="unit">원</span>
+              </div>
+              <input id="amount" name="amount" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" enterkeyhint="next" maxlength="12" aria-describedby="amount-error" />
+            </div>
+            <div class="quick" aria-label="금액 빠르게 더하기" role="group">
+              <button type="button" class="chip px" data-add="1000">+1천</button>
+              <button type="button" class="chip px" data-add="5000">+5천</button>
+              <button type="button" class="chip px" data-add="10000">+1만</button>
+              <button type="button" class="chip px" data-add="50000">+5만</button>
+              <button type="button" class="chip px" data-add="100000">+10만</button>
+              <button type="button" class="chip px" data-clear>지우기</button>
+            </div>
+            <p class="field-error" id="amount-error" hidden></p>
+          </div>
+
+          <fieldset class="cats" id="cats" aria-describedby="cat-error">
+            <legend class="field-label">카테고리</legend>
+            <div class="cat-grid" id="cat-grid"></div>
+            <p class="field-error" id="cat-error" hidden></p>
+          </fieldset>
+
+          <div class="row2">
+            <div class="field" id="date-field">
+              <label class="field-label" for="date">날짜</label>
+              <span class="input px"><input type="date" id="date" name="date" required aria-describedby="date-error" /></span>
+              <p class="field-error" id="date-error" hidden></p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="memo">메모 (선택)</label>
+              <span class="input px"><input type="text" id="memo" name="memo" maxlength="40" placeholder="예: 점심 김밥" autocomplete="off" enterkeyhint="done" /></span>
+            </div>
+          </div>
+
+          <div class="sheet-actions">
+            <button type="button" class="btn btn-danger px" id="delete-btn" hidden>
+              <img data-sprite="trash" data-scale="2" alt="" />삭제
+            </button>
+            <button type="submit" class="btn btn-primary px" id="save-btn">
+              <img data-sprite="coin" data-scale="2" alt="" /><span class="label-text">기록하기</span>
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+    <canvas id="fx" class="fx-canvas" aria-hidden="true"></canvas>
+
+    <script src="js/sprites.js"></script>
+    <script src="js/store.js"></script>
+    <script src="js/fx.js"></script>
+    <script src="js/app.js"></script>
+  </body>
+</html>
