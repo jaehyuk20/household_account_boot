@@ -8,6 +8,7 @@
     <meta name="theme-color" content="#8fd8f7" />
     <link rel="preload" href="fonts/Galmuri14.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="fonts/Galmuri11-Bold.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preconnect" href="https://www.gstatic.com" crossorigin />
     <link rel="stylesheet" href="css/style.css" />
     <script>
       // 저장해 둔 낮/밤 선택을 첫 화면부터 적용합니다
@@ -35,13 +36,93 @@
       <p class="noscript px">이 가계부는 자바스크립트로 움직여요. 브라우저에서 자바스크립트를 켜 주세요.</p>
     </noscript>
 
-    <main class="app" id="app">
+    <div class="page" id="page">
       <header class="topbar">
         <h1 class="brand"><img data-sprite="leaf" data-scale="2" alt="" />모아봐요 가계부</h1>
-        <button class="icon-btn px px-l" id="theme-btn" type="button" aria-label="밤 풍경으로 바꾸기">
-          <img data-sprite="moon" data-scale="2" alt="" />
-        </button>
+        <div class="top-actions">
+          <div class="account" id="account" hidden>
+            <button class="icon-btn px px-l" id="account-btn" type="button" aria-expanded="false" aria-controls="account-menu" aria-label="내 계정">
+              <img data-sprite="user" data-scale="2" alt="" />
+            </button>
+            <div class="account-menu px" id="account-menu" hidden>
+              <p class="label">로그인한 계정</p>
+              <p class="account-name" id="account-name"></p>
+              <p class="account-email" id="account-email"></p>
+              <button class="btn btn-small px" id="logout-btn" type="button">
+                <img data-sprite="door" data-scale="2" alt="" />로그아웃
+              </button>
+            </div>
+          </div>
+          <button class="icon-btn px px-l" id="theme-btn" type="button" aria-label="밤 풍경으로 바꾸기">
+            <img data-sprite="moon" data-scale="2" alt="" />
+          </button>
+        </div>
       </header>
+
+      <div class="boot" id="boot" role="status">
+        <img data-sprite="leaf" data-scale="4" alt="" />
+        <p>섬으로 가는 중…</p>
+      </div>
+
+      <section class="auth" id="auth" hidden aria-labelledby="auth-title">
+        <div class="talk">
+          <button class="tori" id="auth-tori" type="button" aria-label="토리 쓰다듬기"></button>
+          <div class="bubble px" id="auth-bubble">
+            <span class="bubble-tail" aria-hidden="true"></span>
+            <span class="name-tag px" aria-hidden="true">토리</span>
+            <span class="talk-text" id="auth-talk-text" aria-hidden="true"></span>
+            <span class="talk-next" aria-hidden="true"></span>
+          </div>
+          <p class="sr-only" id="auth-talk-live" aria-live="polite"></p>
+        </div>
+
+        <div class="card px auth-card">
+          <h2 class="sr-only" id="auth-title">로그인</h2>
+          <div class="notice px" id="auth-notice" hidden>
+            <p id="auth-notice-text"></p>
+            <button class="btn btn-small px" id="retry-btn" type="button" hidden>다시 시도</button>
+          </div>
+          <div class="tabs px auth-tabs" id="auth-tabs" role="tablist" aria-label="로그인 또는 회원가입">
+            <span class="tab-thumb px" aria-hidden="true"></span>
+            <button class="tab" role="tab" type="button" id="auth-tab-login" aria-selected="true" aria-controls="auth-form">로그인</button>
+            <button class="tab" role="tab" type="button" id="auth-tab-signup" aria-selected="false" aria-controls="auth-form" tabindex="-1">회원가입</button>
+          </div>
+          <form class="auth-form" id="auth-form" role="tabpanel" aria-labelledby="auth-tab-login" novalidate>
+            <fieldset class="auth-fields" id="auth-fields">
+              <legend class="sr-only">계정 정보</legend>
+              <div class="field">
+                <label class="field-label" for="auth-email">이메일</label>
+                <span class="input px"><input id="auth-email" name="email" type="email" autocomplete="email" inputmode="email" required /></span>
+              </div>
+              <div class="field" id="nick-field" hidden>
+                <label class="field-label" for="auth-nick">닉네임 (선택)</label>
+                <span class="input px"><input id="auth-nick" name="nickname" type="text" maxlength="12" autocomplete="nickname" placeholder="토리가 이렇게 불러 드려요" /></span>
+              </div>
+              <div class="field">
+                <label class="field-label" for="auth-pw">비밀번호</label>
+                <span class="input px pw"
+                  ><input id="auth-pw" name="password" type="password" autocomplete="current-password" required aria-describedby="pw-hint" /><button
+                    class="pw-toggle"
+                    type="button"
+                    id="pw-toggle"
+                    aria-pressed="false"
+                    aria-label="비밀번호 보기"
+                  >보기</button></span
+                >
+                <p class="hint" id="pw-hint" hidden>6자 이상으로 정해 주세요.</p>
+              </div>
+              <p class="auth-msg" id="auth-msg" role="alert" hidden></p>
+              <button type="submit" class="btn btn-primary px" id="auth-submit"><span class="label-text">로그인</span></button>
+              <button type="button" class="link-btn" id="forgot-btn">비밀번호를 잊었어요</button>
+            </fieldset>
+          </form>
+          <div class="or" aria-hidden="true"><span>또는</span></div>
+          <button type="button" class="btn px btn-google" id="google-btn"><span class="label-text">Google 계정으로 계속하기</span></button>
+          <p class="auth-note">기록은 계정마다 따로 저장돼요. 다른 사용자는 내 기록을 볼 수 없어요.</p>
+        </div>
+      </section>
+
+      <main class="app" id="app" hidden>
 
       <section class="card px hero" aria-labelledby="month-title">
         <div class="month-bar px px-l dotted">
@@ -95,13 +176,7 @@
         <p class="sr-only" id="talk-live" aria-live="polite"></p>
       </section>
 
-      <div class="sample-note px" id="sample-note" hidden>
-        <img data-sprite="sprout" data-scale="2" alt="" />
-        <p>지금 보이는 기록은 둘러보기용 예시예요. 내 기록만 남기려면 예시를 지워 주세요.</p>
-        <button class="btn btn-small px" id="clear-samples" type="button">예시 지우기</button>
-      </div>
-
-      <div class="tabs px" role="tablist" aria-label="보기">
+      <div class="tabs px" id="view-tabs" role="tablist" aria-label="보기">
         <span class="tab-thumb px" aria-hidden="true"></span>
         <button class="tab" role="tab" type="button" id="tab-list" aria-selected="true" aria-controls="panel-list">내역</button>
         <button class="tab" role="tab" type="button" id="tab-stats" aria-selected="false" aria-controls="panel-stats" tabindex="-1">통계</button>
@@ -109,6 +184,10 @@
 
       <section class="card px panel" id="panel-list" role="tabpanel" aria-labelledby="tab-list">
         <div class="panel-inner" id="list"></div>
+        <div class="loading" id="list-loading" hidden>
+          <img data-sprite="leaf" data-scale="3" alt="" />
+          <p id="list-loading-text">기록을 불러오는 중…</p>
+        </div>
         <div class="empty" id="empty" hidden>
           <img data-sprite="sprout" data-scale="3" alt="" />
           <p class="empty-title">이 달에는 아직 기록이 없어요</p>
@@ -126,15 +205,20 @@
           <p class="stats-total" id="stats-total"></p>
         </div>
         <ol class="bars" id="bars" data-kind="expense"></ol>
+        <div class="loading" id="stats-loading" hidden>
+          <img data-sprite="leaf" data-scale="3" alt="" />
+          <p>기록을 불러오는 중…</p>
+        </div>
         <div class="empty" id="stats-empty" hidden>
           <img data-sprite="sprout" data-scale="3" alt="" />
           <p class="empty-title" id="stats-empty-title">이 달에는 지출 기록이 없어요</p>
           <p class="empty-sub">기록이 쌓이면 카테고리별로 모아서 보여 드릴게요.</p>
         </div>
       </section>
-    </main>
+      </main>
+    </div>
 
-    <div class="fab-wrap">
+    <div class="fab-wrap" hidden>
       <button class="fab px" id="fab" type="button" aria-label="새 기록 추가" aria-haspopup="dialog" aria-controls="sheet">
         <img data-sprite="plus" data-scale="3" alt="" />
       </button>
@@ -209,12 +293,15 @@
       </form>
     </div>
 
+    <div class="wipe" id="wipe" hidden aria-hidden="true"><img data-sprite="leaf" data-scale="5" alt="" /></div>
     <div class="toasts" id="toasts" aria-live="polite"></div>
     <canvas id="fx" class="fx-canvas" aria-hidden="true"></canvas>
 
+    <script src="js/config.js"></script>
     <script src="js/sprites.js"></script>
     <script src="js/store.js"></script>
     <script src="js/fx.js"></script>
     <script src="js/app.js"></script>
+    <script type="module" src="js/cloud.js"></script>
   </body>
 </html>

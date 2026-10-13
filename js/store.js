@@ -1,5 +1,7 @@
 /*
- * 데이터: 카테고리 정의와 기록 저장소 (브라우저 localStorage)
+ * 데이터: 카테고리 정의와 기록 저장소
+ * 기록은 로그인한 사람의 클라우드 공간(window.Cloud)에 달마다 나눠 실시간으로 받아 옵니다.
+ * 추가·수정·삭제는 화면에 먼저 반영하고(낙관적 갱신) 저장은 뒤에서 이어서 합니다.
  */
 (function (global) {
   'use strict';
@@ -39,8 +41,8 @@
     return CAT_INDEX[type + ':' + id] || (type === 'income' ? CAT_INDEX['income:income-etc'] : CAT_INDEX['expense:etc']);
   }
 
-  const KEY = 'moa-ledger/v1';
   const MAX_AMOUNT = 9999999999;
+  const KEEP_MONTHS = 4; // 실시간 구독을 유지할 최근 달 수
 
   /* ───────── 날짜 도우미 (로컬 시간 기준) ───────── */
   const pad = (n) => String(n).padStart(2, '0');
@@ -57,94 +59,79 @@
   function monthKey(y, m) {
     return `${y}-${pad(m)}`;
   }
-
-  function uid() {
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  function monthRange(y, m) {
+    const next = m === 12 ? [y + 1, 1] : [y, m + 1];
+    return [`${monthKey(y, m)}-01`, `${monthKey(next[0], next[1])}-01`];
   }
 
-  /* ───────── 처음 열었을 때 보여 줄 예시 ───────── */
-  function sampleEntries() {
-    const now = new Date();
-    const rows = [
-      [0, 'expense', 'food', 8500, '점심 김밥'],
-      [0, 'expense', 'cafe', 4800, '아이스 라떼'],
-      [1, 'expense', 'transport', 1500, '버스'],
-      [1, 'expense', 'living', 23400, '마트 장보기'],
-      [2, 'income', 'side', 120000, '디자인 외주'],
-      [3, 'expense', 'leisure', 15000, '영화 관람'],
-      [4, 'expense', 'shopping', 39000, '가을 니트'],
-      [5, 'expense', 'food', 32000, '친구랑 저녁'],
-      [6, 'expense', 'health', 12000, '약국'],
-      [8, 'income', 'salary', 2850000, '@월급'],
-      [9, 'expense', 'housing', 550000, '월세'],
-      [10, 'expense', 'gift', 50000, '친구 생일 선물'],
-      [12, 'income', 'resale', 25000, '중고 책 판매'],
-      [15, 'expense', 'education', 45000, '온라인 강의'],
-      [18, 'expense', 'travel', 180000, '제주 숙소'],
-      [22, 'expense', 'cafe', 6200, '조각 케이크'],
-      [25, 'income', 'allowance', 100000, '부모님 용돈'],
-      [38, 'income', 'salary', 2850000, '@월급'],
-      [40, 'expense', 'housing', 550000, '월세'],
-    ];
-    return rows.map(([ago, type, cat, amount, memo], i) => {
-      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ago);
-      return {
-        id: 'sample-' + i,
-        type,
-        cat,
-        amount,
-        date: toISO(d),
-        memo: memo === '@월급' ? `${d.getMonth() + 1}월 월급` : memo,
-        createdAt: d.getTime() + (rows.length - i),
-        sample: true,
-      };
-    });
+  /* 서버에서 받은 문서는 모양을 확인한 뒤에만 씁니다 */
+  function normalize(raw) {
+    if (!raw || typeof raw.id !== 'string') return null;
+    if (raw.type !== 'income' && raw.type !== 'expense') return null;
+    if (!Number.isFinite(raw.amount) || raw.amount <= 0) return null;
+    if (typeof raw.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw.date)) return null;
+    return {
+      id: raw.id,
+      type: raw.type,
+      cat: typeof raw.cat === 'string' ? raw.cat : '',
+      amount: Math.round(raw.amount),
+      date: raw.date,
+      memo: typeof raw.memo === 'string' ? raw.memo : '',
+      createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : 0,
+      updatedAt: Number.isFinite(raw.updatedAt) ? raw.updatedAt : 0,
+    };
+  }
+  function sortEntries(list) {
+    return list.sort((a, b) => (a.date === b.date ? b.createdAt - a.createdAt : a.date < b.date ? 1 : -1));
+  }
+  function clean(input) {
+    return {
+      type: input.type,
+      cat: String(input.cat),
+      amount: Math.min(MAX_AMOUNT, Math.round(input.amount)),
+      date: input.date,
+      memo: String(input.memo || '').trim().slice(0, 40),
+    };
   }
 
   /* ───────── 저장소 ───────── */
-  let data = { version: 1, entries: [] };
-  let persistent = true;
+  let cloud = null;
+  let uid = null;
+  let clock = 0;
+  const months = new Map(); // 'YYYY-MM' → { entries, ready, unsub, used }
+  const changeFns = new Set();
+  const errorFns = new Set();
 
-  function load() {
-    let raw = null;
-    try {
-      raw = global.localStorage.getItem(KEY);
-    } catch {
-      persistent = false;
+  const emitChange = (key) => changeFns.forEach((fn) => fn(key));
+  const emitError = (kind, err) => errorFns.forEach((fn) => fn(kind, err));
+
+  function evict(keep) {
+    if (months.size <= KEEP_MONTHS) return;
+    const old = [...months.entries()].filter(([k]) => k !== keep).sort((a, b) => a[1].used - b[1].used);
+    while (months.size > KEEP_MONTHS && old.length) {
+      const [k, slot] = old.shift();
+      if (slot.unsub) slot.unsub();
+      months.delete(k);
     }
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (parsed && Array.isArray(parsed.entries)) {
-          data = { version: 1, entries: parsed.entries.filter(valid) };
-          return;
-        }
-      } catch {
-        /* 깨진 데이터는 무시하고 새로 시작 */
-      }
-    }
-    data = { version: 1, entries: sampleEntries() };
-    save();
   }
 
-  function valid(e) {
-    return (
-      e &&
-      typeof e.id === 'string' &&
-      (e.type === 'income' || e.type === 'expense') &&
-      Number.isFinite(e.amount) &&
-      e.amount > 0 &&
-      /^\d{4}-\d{2}-\d{2}$/.test(e.date)
-    );
-  }
-
-  function save() {
-    if (!persistent) return;
-    try {
-      global.localStorage.setItem(KEY, JSON.stringify(data));
-    } catch {
-      persistent = false;
+  function findLocal(id) {
+    for (const slot of months.values()) {
+      const e = slot.entries.find((x) => x.id === id);
+      if (e) return e;
     }
+    return null;
+  }
+  function placeLocal(entry) {
+    const slot = months.get(entry.date.slice(0, 7));
+    if (slot && slot.ready) slot.entries = sortEntries(slot.entries.filter((e) => e.id !== entry.id).concat(entry));
+  }
+  function dropLocal(id) {
+    for (const slot of months.values()) slot.entries = slot.entries.filter((e) => e.id !== id);
+  }
+  function persist(entry) {
+    const { id, ...data } = entry;
+    cloud.put(uid, id, data).catch((err) => emitError('write', err));
   }
 
   const Store = {
@@ -155,73 +142,112 @@
     todayISO,
     parseISO,
     monthKey,
-    KEY,
-    load,
-    get persistent() {
-      return persistent;
+
+    /** 로그인한 사람의 저장소를 엽니다 */
+    begin(cloudApi, userId) {
+      this.end();
+      cloud = cloudApi;
+      uid = userId;
     },
-    all() {
-      return data.entries.slice();
+    /** 구독을 모두 끊고 메모리에 있던 기록을 비웁니다 (로그아웃) */
+    end() {
+      for (const slot of months.values()) {
+        try {
+          if (slot.unsub) slot.unsub();
+        } catch {
+          /* 이미 닫힌 연결이면 무시합니다 */
+        }
+      }
+      months.clear();
+      uid = null;
     },
+    get active() {
+      return Boolean(uid);
+    },
+
+    /** 그 달을 실시간으로 받기 시작합니다. 이미 받아 둔 달이면 true */
+    watch(y, m) {
+      if (!uid) return false;
+      const key = monthKey(y, m);
+      let slot = months.get(key);
+      if (slot) {
+        slot.used = ++clock;
+        return slot.ready;
+      }
+      slot = { entries: [], ready: false, unsub: null, used: ++clock };
+      months.set(key, slot);
+      const [start, end] = monthRange(y, m);
+      slot.unsub = cloud.listenMonth(
+        uid,
+        start,
+        end,
+        (docs) => {
+          if (months.get(key) !== slot) return;
+          slot.entries = sortEntries(docs.map(normalize).filter(Boolean));
+          slot.ready = true;
+          emitChange(key);
+        },
+        (err) => {
+          if (months.get(key) === slot) months.delete(key);
+          emitError('read', err);
+        }
+      );
+      evict(key);
+      return false;
+    },
+    ready(y, m) {
+      const slot = months.get(monthKey(y, m));
+      return Boolean(slot && slot.ready);
+    },
+    onChange(fn) {
+      changeFns.add(fn);
+    },
+    onError(fn) {
+      errorFns.add(fn);
+    },
+
     get(id) {
-      return data.entries.find((e) => e.id === id) || null;
+      return findLocal(id);
     },
     add(input) {
-      const entry = {
-        id: uid(),
-        type: input.type,
-        cat: input.cat,
-        amount: Math.min(MAX_AMOUNT, Math.round(input.amount)),
-        date: input.date,
-        memo: (input.memo || '').trim().slice(0, 40),
-        createdAt: Date.now(),
-      };
-      data.entries.push(entry);
-      save();
+      const now = Date.now();
+      const entry = { id: cloud.newId(uid), ...clean(input), createdAt: now, updatedAt: now };
+      placeLocal(entry);
+      persist(entry);
       return entry;
     },
     update(id, patch) {
-      const e = this.get(id);
-      if (!e) return null;
-      Object.assign(e, {
-        type: patch.type,
-        cat: patch.cat,
-        amount: Math.min(MAX_AMOUNT, Math.round(patch.amount)),
-        date: patch.date,
-        memo: (patch.memo || '').trim().slice(0, 40),
-      });
-      delete e.sample;
-      save();
-      return e;
-    },
-    remove(id) {
-      const i = data.entries.findIndex((e) => e.id === id);
-      if (i < 0) return null;
-      const [removed] = data.entries.splice(i, 1);
-      save();
-      return removed;
-    },
-    restore(entry) {
-      if (this.get(entry.id)) return entry;
-      data.entries.push(entry);
-      save();
+      const old = findLocal(id);
+      if (!old) return null;
+      const entry = { ...old, ...clean(patch), updatedAt: Date.now() };
+      dropLocal(id);
+      placeLocal(entry);
+      persist(entry);
       return entry;
     },
-    hasSamples() {
-      return data.entries.some((e) => e.sample);
+    remove(id) {
+      const old = findLocal(id);
+      if (!old) return null;
+      dropLocal(id);
+      cloud.remove(uid, id).catch((err) => emitError('delete', err));
+      return old;
     },
-    clearSamples() {
-      const removed = data.entries.filter((e) => e.sample);
-      data.entries = data.entries.filter((e) => !e.sample);
-      save();
-      return removed;
+    restore(entry) {
+      placeLocal(entry);
+      persist(entry);
+      return entry;
     },
-    /** 해당 달의 기록 (최근 날짜, 최근 입력 순) */
+
+    /** 그 달의 기록 (최근 날짜, 최근 입력 순) */
     month(y, m) {
-      const key = monthKey(y, m);
-      return data.entries
-        .filter((e) => e.date.slice(0, 7) === key)
-        .sort((a, b) => (a.date === b.date ? b.createdAt - a.createdAt : a.date < b.date ? 1 : -1));
+      const slot = months.get(monthKey(y, m));
+      return slot ? slot.entries.slice() : [];
+    },
+    /** 화면을 다시 그려야 하는지 비교할 때 쓰는 지문 */
+    signature(y, m) {
+      const slot = months.get(monthKey(y, m));
+      if (!slot || !slot.ready) return 'loading';
+      return slot.entries.map((e) => `${e.id}:${e.updatedAt}:${e.amount}:${e.date}:${e.type}:${e.cat}:${e.memo}`).join('|');
     },
     summary(y, m) {
       let income = 0;

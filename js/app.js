@@ -1,5 +1,6 @@
 /*
  * 모아봐요 가계부 — 화면 동작
+ * 시작(boot) → 로그인(auth) → 가계부(app) 세 화면을 오갑니다.
  */
 (function () {
   'use strict';
@@ -17,12 +18,22 @@
 
   const today = new Date();
   const state = {
+    screen: 'boot',
+    cloud: null,
+    user: null,
+    pendingName: '',
     y: today.getFullYear(),
     m: today.getMonth() + 1,
     tab: 'list',
     statKind: 'expense',
+    loaded: new Set(), // 데이터를 받아 처음 그린 달
+    renderedSig: '',
+    busyUntil: 0,
+    nav: Promise.resolve(),
     sheet: { open: false, mode: 'add', id: null, type: 'expense', amount: 0, cat: null, opener: null, origin: null, lastType: 'expense' },
-    talk: { lines: [], idx: 0, ctrl: null },
+    talk: { lines: [], idx: 0 },
+    authMode: 'login',
+    authLine: 0,
   };
   let odometer = null;
   let prevSummary = { income: 0, expense: 0 };
@@ -36,6 +47,14 @@
   const signed = (type, n) => (type === 'income' ? '+' : MINUS) + fmt(n);
   const isCurrentMonth = () => state.y === today.getFullYear() && state.m === today.getMonth() + 1;
   const monthIndex = (y, m) => y * 12 + m;
+  const busy = (ms) => {
+    state.busyUntil = Math.max(state.busyUntil, Date.now() + ms);
+  };
+  const shake = (el) => {
+    el.classList.remove('shake');
+    void el.offsetWidth;
+    el.classList.add('shake');
+  };
 
   /* ───────── 정적 스프라이트 채우기 ───────── */
   function paintSprites(root = document) {
@@ -49,7 +68,9 @@
       img.classList.add('px-img');
       img.draggable = false;
     }
-    $('#tori').style.setProperty('--img', `url("${S.sheet('tori')}")`);
+    const toriSheet = `url("${S.sheet('tori')}")`;
+    $('#tori').style.setProperty('--img', toriSheet);
+    $('#auth-tori').style.setProperty('--img', toriSheet);
   }
 
   /* ───────── 테마 ───────── */
@@ -63,8 +84,7 @@
     const dark = currentTheme() === 'dark';
     const btn = $('#theme-btn');
     btn.setAttribute('aria-label', dark ? '낮 풍경으로 바꾸기' : '밤 풍경으로 바꾸기');
-    const img = btn.querySelector('img');
-    img.src = S.url(dark ? 'sun' : 'moon');
+    btn.querySelector('img').src = S.url(dark ? 'sun' : 'moon');
     const meta = $('meta[name="theme-color"]');
     if (meta) meta.content = dark ? '#10173a' : '#8fd8f7';
     M.Ambient.start(today.getMonth() + 1, dark);
@@ -77,11 +97,76 @@
     } catch {
       /* 저장할 수 없어도 화면 전환은 됩니다 */
     }
-    const img = $('#theme-btn img');
-    M.animate(img, [{ transform: 'rotate(-180deg) scale(.4)', opacity: 0 }, { transform: 'none', opacity: 1 }], {
+    M.animate($('#theme-btn img'), [{ transform: 'rotate(-180deg) scale(.4)', opacity: 0 }, { transform: 'none', opacity: 1 }], {
       duration: M.SPRING.duration,
       easing: M.SPRING.easing,
     });
+  }
+
+  /* ───────── 화면 전환 ───────── */
+  function setScreen(name) {
+    state.screen = name;
+    $('#boot').hidden = name !== 'boot';
+    $('#auth').hidden = name !== 'auth';
+    $('#app').hidden = name !== 'app';
+    $('.fab-wrap').hidden = name !== 'app';
+    $('#account').hidden = name !== 'app';
+    if (name !== 'app') toggleAccountMenu(false);
+  }
+
+  /* 나뭇잎 동그라미가 화면을 덮었다가 걷히면서 다음 화면이 나옵니다 */
+  async function wipe(swap, origin) {
+    const el = $('#wipe');
+    if (M.reduced()) {
+      swap();
+      return;
+    }
+    let cx = innerWidth / 2;
+    let cy = innerHeight / 2;
+    if (origin) {
+      const r = origin.getBoundingClientRect();
+      cx = r.left + r.width / 2;
+      cy = r.top + r.height / 2;
+    }
+    const cover = (x, y) => Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y)) + 4;
+    el.hidden = false;
+    const close = el.animate(
+      [{ clipPath: `circle(0px at ${cx}px ${cy}px)` }, { clipPath: `circle(${cover(cx, cy)}px at ${cx}px ${cy}px)` }],
+      { duration: 460, easing: 'cubic-bezier(.65,0,.35,1)', fill: 'forwards' }
+    );
+    M.animate($('img', el), [{ transform: 'scale(0) rotate(-120deg)' }, { transform: 'none' }], {
+      duration: M.SPRING.duration,
+      easing: M.SPRING.easing,
+      delay: 160,
+      fill: 'backwards',
+    });
+    await close.finished.catch(() => {});
+    swap();
+    await new Promise((r) => setTimeout(r, 160));
+    const mx = innerWidth / 2;
+    const my = innerHeight / 2;
+    const open = el.animate(
+      [{ clipPath: `circle(${cover(mx, my)}px at ${mx}px ${my}px)` }, { clipPath: `circle(0px at ${mx}px ${my}px)` }],
+      { duration: 520, easing: 'cubic-bezier(.65,0,.35,1)', fill: 'forwards' }
+    );
+    await open.finished.catch(() => {});
+    el.hidden = true;
+    close.cancel();
+    open.cancel();
+  }
+
+  /* 화면 이동은 순서대로 하나씩 처리합니다 */
+  function go(name, prepare, origin) {
+    state.nav = state.nav.then(async () => {
+      const swap = () => {
+        prepare();
+        setScreen(name);
+        window.scrollTo(0, 0);
+      };
+      if (state.screen === 'boot') swap();
+      else await wipe(swap, origin);
+    });
+    return state.nav;
   }
 
   /* ───────── 달 표시 ───────── */
@@ -117,6 +202,13 @@
 
   /* ───────── 요약 ───────── */
   function renderSummary({ animate = true, delay = 0 } = {}) {
+    const ready = Store.ready(state.y, state.m);
+    $('.hero').classList.toggle('is-loading', !ready);
+    $('#balance-label').textContent = isCurrentMonth() ? '이번 달 남은 돈' : `${state.m}월 남은 돈`;
+    if (!ready) {
+      $('#meter-note').textContent = '기록을 불러오는 중…';
+      return;
+    }
     const s = Store.summary(state.y, state.m);
     const bal = $('#balance');
     bal.classList.toggle('is-neg', s.balance < 0);
@@ -124,7 +216,6 @@
     bal.classList.toggle('long', fmt(Math.abs(s.balance)).length > 10);
     odometer.set(s.balance, { instant: !animate, delay });
     $('#balance-sr').textContent = `${s.balance < 0 ? '마이너스 ' : ''}${fmt(Math.abs(s.balance))}원`;
-    $('#balance-label').textContent = isCurrentMonth() ? '이번 달 남은 돈' : `${state.m}월 남은 돈`;
 
     const inFmt = (n) => (n ? `+${fmt(n)}원` : '0원');
     const outFmt = (n) => (n ? `${MINUS}${fmt(n)}원` : '0원');
@@ -189,12 +280,6 @@
     const cat = document.createElement('span');
     cat.className = 'e-cat';
     cat.textContent = c.name;
-    if (e.sample) {
-      const tag = document.createElement('span');
-      tag.className = 'sample-tag';
-      tag.textContent = '예시';
-      cat.appendChild(tag);
-    }
     main.appendChild(cat);
     if (e.memo) {
       const memo = document.createElement('span');
@@ -206,10 +291,7 @@
     amt.className = 'e-amt ' + (e.type === 'income' ? 'in' : 'out');
     amt.textContent = signed(e.type, e.amount) + '원';
     btn.append(img, main, amt);
-    btn.setAttribute(
-      'aria-label',
-      `${c.name} ${TYPE_NAME[e.type]} ${fmt(e.amount)}원${e.memo ? ', ' + e.memo : ''}${e.sample ? ', 예시' : ''}. 눌러서 고치기`
-    );
+    btn.setAttribute('aria-label', `${c.name} ${TYPE_NAME[e.type]} ${fmt(e.amount)}원${e.memo ? ', ' + e.memo : ''}. 눌러서 고치기`);
     li.appendChild(btn);
     return li;
   }
@@ -225,6 +307,15 @@
 
   function renderList({ flip = false, enterDir = null, fresh = null, delay = 0 } = {}) {
     const list = $('#list');
+    const ready = Store.ready(state.y, state.m);
+    $('#list-loading').hidden = ready;
+    if (!ready) {
+      list.textContent = '';
+      $('#empty').hidden = true;
+      $('#list-loading-text').textContent = '기록을 불러오는 중…';
+      state.renderedSig = 'loading';
+      return;
+    }
     const entries = Store.month(state.y, state.m);
     const before = flip ? measure(list) : null;
     list.textContent = '';
@@ -261,6 +352,7 @@
       day.append(head, ul);
       list.appendChild(day);
     }
+    state.renderedSig = Store.signature(state.y, state.m);
 
     if (flip) playFlip(list, before, fresh);
     else if (enterDir !== null) cascade(list, enterDir, delay);
@@ -315,15 +407,15 @@
     });
   }
 
-  // 높이를 접으며 사라지게 합니다. gap은 부모 그리드 간격까지 함께 접을 때 씁니다.
-  function collapse(li, delay = 0, gap = 0) {
+  // 높이를 접으며 사라지게 합니다
+  function collapse(li, delay = 0) {
     if (!li || M.reduced()) return Promise.resolve();
     const h = li.getBoundingClientRect().height;
     li.style.overflow = 'hidden';
     const a = li.animate(
       [
-        { height: h + 'px', marginTop: '0px', opacity: 1, transform: 'none' },
-        { height: '0px', marginTop: `-${gap}px`, opacity: 0, transform: 'scale(.92)' },
+        { height: h + 'px', opacity: 1, transform: 'none' },
+        { height: '0px', opacity: 0, transform: 'scale(.92)' },
       ],
       { duration: 280, delay, easing: M.EASE_IN, fill: 'forwards' }
     );
@@ -333,14 +425,20 @@
   /* ───────── 통계 ───────── */
   function renderStats({ animate = true } = {}) {
     const kind = state.statKind;
+    const ready = Store.ready(state.y, state.m);
+    const bars = $('#bars');
+    const totalEl = $('#stats-total');
+    bars.dataset.kind = kind;
+    bars.textContent = '';
+    totalEl.textContent = '';
+    $('#stats-loading').hidden = ready;
+    if (!ready) {
+      $('#stats-empty').hidden = true;
+      return;
+    }
     const rows = Store.byCategory(state.y, state.m, kind);
     const total = rows.reduce((a, r) => a + r.sum, 0);
     const count = rows.reduce((a, r) => a + r.count, 0);
-    const bars = $('#bars');
-    bars.dataset.kind = kind;
-    bars.textContent = '';
-    const totalEl = $('#stats-total');
-    totalEl.textContent = '';
     if (total) {
       totalEl.append(`${TYPE_NAME[kind]} 합계 `);
       const b = document.createElement('b');
@@ -390,22 +488,25 @@
   }
 
   /* ───────── 탭 ───────── */
-  function setTab(tab, { focus = false } = {}) {
-    if (state.tab === tab) return;
-    state.tab = tab;
-    const isList = tab === 'list';
-    $('.tabs').style.setProperty('--tab', isList ? 0 : 1);
+  function paintTabs() {
+    const isList = state.tab === 'list';
+    $('#view-tabs').style.setProperty('--tab', isList ? 0 : 1);
     const tl = $('#tab-list');
     const ts = $('#tab-stats');
     tl.setAttribute('aria-selected', String(isList));
     ts.setAttribute('aria-selected', String(!isList));
     tl.tabIndex = isList ? 0 : -1;
     ts.tabIndex = isList ? -1 : 0;
-    if (focus) (isList ? tl : ts).focus();
+    $('#panel-list').hidden = !isList;
+    $('#panel-stats').hidden = isList;
+  }
+  function setTab(tab, { focus = false } = {}) {
+    if (state.tab === tab) return;
+    state.tab = tab;
+    paintTabs();
+    const isList = tab === 'list';
+    if (focus) (isList ? $('#tab-list') : $('#tab-stats')).focus();
     const show = isList ? $('#panel-list') : $('#panel-stats');
-    const hide = isList ? $('#panel-stats') : $('#panel-list');
-    hide.hidden = true;
-    show.hidden = false;
     M.animate(show, [{ opacity: 0, transform: `translateX(${isList ? -24 : 24}px)` }, { opacity: 1, transform: 'none' }], {
       duration: M.SPRING_SOFT.duration,
       easing: M.SPRING_SOFT.easing,
@@ -423,6 +524,12 @@
   }
 
   /* ───────── 달 이동 ───────── */
+  function watchMonth(y, m) {
+    const key = Store.monthKey(y, m);
+    if (Store.watch(y, m)) state.loaded.add(key);
+    else state.loaded.delete(key);
+  }
+
   function changeMonth(dir) {
     let { y, m } = state;
     m += dir;
@@ -435,6 +542,7 @@
     }
     state.y = y;
     state.m = m;
+    watchMonth(y, m);
     renderMonthLabel(dir);
     renderSummary();
     const panel = state.tab === 'list' ? $('#panel-list .panel-inner') : $('#bars');
@@ -453,16 +561,79 @@
     refreshTalk();
   }
 
+  /* ───────── 데이터가 도착하거나 바뀌었을 때 ───────── */
+  function arrive() {
+    renderSummary({ animate: true });
+    renderList({ enterDir: 0 });
+    renderStats({ animate: state.tab === 'stats' });
+    refreshTalk();
+  }
+
+  let syncTimer = 0;
+  function scheduleSync() {
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(syncNow, 160);
+  }
+  function syncNow() {
+    const wait = state.busyUntil - Date.now();
+    if (wait > 0) {
+      syncTimer = setTimeout(syncNow, wait + 30);
+      return;
+    }
+    if (state.screen !== 'app' || !Store.ready(state.y, state.m)) return;
+    if (Store.signature(state.y, state.m) === state.renderedSig) return;
+    renderList({ flip: true });
+    renderSummary();
+    renderStats({ animate: false });
+  }
+
+  function onStoreChange(key) {
+    if (!state.user || state.screen !== 'app' || key !== Store.monthKey(state.y, state.m)) return;
+    if (!state.loaded.has(key)) {
+      state.loaded.add(key);
+      arrive();
+    } else scheduleSync();
+  }
+
+  function onStoreError(kind, err) {
+    console.error('[가계부]', kind, err);
+    const denied = err && err.code === 'permission-denied';
+    if (kind === 'read') {
+      $('#list-loading-text').textContent = '기록을 불러오지 못했어요.';
+      toast(denied ? '이 기록을 볼 권한이 없어요. 다시 로그인해 주세요.' : '기록을 불러오지 못했어요. 인터넷 연결을 확인해 주세요.', {
+        icon: 'close',
+      });
+    } else {
+      toast(denied ? '저장할 권한이 없어요. 다시 로그인해 주세요.' : '저장하지 못했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.', {
+        icon: 'close',
+      });
+      scheduleSync();
+    }
+  }
+
   /* ───────── 토리의 말 ───────── */
+  const TALKERS = {
+    app: { tori: '#tori', bubble: '#bubble', text: '#talk-text', live: '#talk-live' },
+    auth: { tori: '#auth-tori', bubble: '#auth-bubble', text: '#auth-talk-text', live: '#auth-talk-live' },
+  };
+  const talkCtrl = {};
+  const AUTH_LINES = [
+    '어서 와요! 로그인하면 어느 기기에서든 내 가계부를 이어서 쓸 수 있어요.',
+    '처음이라면 회원가입 탭에서 이메일로 가입해 보세요. Google 계정도 돼요.',
+    '기록은 계정마다 따로 보관돼요. 다른 사용자는 내 기록을 볼 수 없어요.',
+  ];
+
   function greeting() {
+    const who = state.user && state.user.name ? `${state.user.name}님, ` : '';
     const h = new Date().getHours();
-    if (h >= 5 && h < 11) return '좋은 아침이에요! 오늘도 도토리를 차곡차곡 모아 봐요.';
-    if (h >= 11 && h < 17) return '점심은 먹었어요? 먹은 것도 잊기 전에 적어 두면 좋아요.';
-    if (h >= 17 && h < 22) return '오늘 하루도 수고했어요. 자기 전에 오늘 쓴 돈을 한번 정리해 봐요.';
-    return '밤이 깊었어요. 오늘 기록만 마무리하고 푹 쉬어요.';
+    if (h >= 5 && h < 11) return `${who}좋은 아침이에요! 오늘도 도토리를 차곡차곡 모아 봐요.`;
+    if (h >= 11 && h < 17) return `${who}점심은 먹었어요? 먹은 것도 잊기 전에 적어 두면 좋아요.`;
+    if (h >= 17 && h < 22) return `${who}오늘 하루도 수고했어요. 자기 전에 오늘 쓴 돈을 한번 정리해 봐요.`;
+    return `${who}밤이 깊었어요. 오늘 기록만 마무리하고 푹 쉬어요.`;
   }
 
   function buildLines() {
+    if (!Store.ready(state.y, state.m)) return ['기록을 불러오는 중이에요. 잠시만요!'];
     const s = Store.summary(state.y, state.m);
     const entries = Store.month(state.y, state.m);
     const cur = isCurrentMonth();
@@ -495,14 +666,14 @@
         lines.push(n ? `오늘은 벌써 ${n}건을 기록했어요. 꼼꼼해요!` : '오늘 쓴 돈이 있다면 잊기 전에 적어 둬요.');
       }
     }
-    if (Store.hasSamples()) lines.push('지금 기록은 예시예요. 예시 지우기를 누르면 깨끗한 가계부로 시작해요.');
     lines.push(greeting());
     return lines;
   }
 
-  function say(text, { hop = false } = {}) {
-    const tori = $('#tori');
-    const bubble = $('#bubble');
+  function say(text, { hop = false, who = 'app' } = {}) {
+    const t = TALKERS[who];
+    const tori = $(t.tori);
+    const bubble = $(t.bubble);
     bubble.classList.remove('done');
     tori.classList.add('is-talking');
     if (hop) {
@@ -510,8 +681,8 @@
       void tori.offsetWidth;
       tori.classList.add('hop');
     }
-    $('#talk-live').textContent = text;
-    state.talk.ctrl = M.typewriter($('#talk-text'), text, {
+    $(t.live).textContent = text;
+    talkCtrl[who] = M.typewriter($(t.text), text, {
       speed: 34,
       onDone: () => {
         tori.classList.remove('is-talking');
@@ -525,7 +696,7 @@
     say(first || state.talk.lines[0]);
   }
   function nextLine() {
-    const c = state.talk.ctrl;
+    const c = talkCtrl.app;
     if (c && !c.done) {
       c.skip();
       return;
@@ -534,6 +705,15 @@
     t.lines = buildLines();
     t.idx = (t.idx + 1) % t.lines.length;
     say(t.lines[t.idx], { hop: true });
+  }
+  function nextAuthLine() {
+    const c = talkCtrl.auth;
+    if (c && !c.done) {
+      c.skip();
+      return;
+    }
+    state.authLine = (state.authLine + 1) % AUTH_LINES.length;
+    say(AUTH_LINES[state.authLine], { hop: true, who: 'auth' });
   }
 
   /* ───────── 알림 ───────── */
@@ -585,21 +765,279 @@
     el.addEventListener('focusin', () => clearTimeout(timer));
   }
 
-  /* ───────── 예시 안내 ───────── */
-  function renderSampleNote() {
-    $('#sample-note').hidden = !Store.hasSamples();
+  /* ───────── 계정 메뉴 ───────── */
+  function updateAccount() {
+    const u = state.user;
+    if (!u) return;
+    $('#account-name').textContent = u.name ? `${u.name}님` : '섬 주민';
+    $('#account-email').textContent = u.email;
+    $('#account-btn').setAttribute('aria-label', `내 계정 (${u.email || u.name})`);
   }
-  function clearSamples() {
-    const rows = $$('.entry[data-id^="sample-"]');
-    rows.forEach((r, i) => setTimeout(() => M.FX.poof(r), i * 45));
-    const note = $('#sample-note');
-    Promise.all([...rows.map((r, i) => collapse(r.parentElement, i * 45)), collapse(note, 120, 18)]).then(() => {
-      note.getAnimations().forEach((a) => a.cancel());
-      note.style.overflow = '';
-      Store.clearSamples();
-      renderAll();
-      refreshTalk('예시를 모두 치웠어요. 이제부터 여기는 당신만의 가계부예요!');
-      toast('예시 기록을 모두 지웠어요.', { icon: 'sprout' });
+  function toggleAccountMenu(force) {
+    const menu = $('#account-menu');
+    const btn = $('#account-btn');
+    const open = typeof force === 'boolean' ? force : menu.hidden;
+    if (open === !menu.hidden) return;
+    btn.setAttribute('aria-expanded', String(open));
+    if (open) {
+      menu.hidden = false;
+      M.animate(menu, [{ opacity: 0, transform: 'translateY(-10px) scale(.88)' }, { opacity: 1, transform: 'none' }], {
+        duration: M.SPRING.duration,
+        easing: M.SPRING.easing,
+      });
+      return;
+    }
+    const a = M.animate(menu, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-6px) scale(.95)' }], {
+      duration: 140,
+      easing: M.EASE_IN,
+    });
+    (a ? a.finished : Promise.resolve()).then(
+      () => {
+        if (btn.getAttribute('aria-expanded') === 'false') menu.hidden = true;
+      },
+      () => {}
+    );
+  }
+  async function logout() {
+    const btn = $('#logout-btn');
+    btn.setAttribute('aria-busy', 'true');
+    try {
+      await state.cloud.signOut();
+    } catch {
+      toast('로그아웃하지 못했어요. 다시 시도해 주세요.', { icon: 'close' });
+    } finally {
+      btn.setAttribute('aria-busy', 'false');
+    }
+  }
+
+  /* ───────── 로그인 화면 ───────── */
+  const AUTH_ERRORS = {
+    'auth/invalid-email': '이메일 주소 형식이 올바르지 않아요.',
+    'auth/missing-email': '이메일을 입력해 주세요.',
+    'auth/missing-password': '비밀번호를 입력해 주세요.',
+    'auth/invalid-credential': '이메일 또는 비밀번호가 맞지 않아요.',
+    'auth/invalid-login-credentials': '이메일 또는 비밀번호가 맞지 않아요.',
+    'auth/wrong-password': '이메일 또는 비밀번호가 맞지 않아요.',
+    'auth/user-not-found': '이메일 또는 비밀번호가 맞지 않아요.',
+    'auth/email-already-in-use': '이미 가입된 이메일이에요. 로그인 탭에서 로그인해 주세요.',
+    'auth/weak-password': '비밀번호는 6자 이상으로 정해 주세요.',
+    'auth/too-many-requests': '시도가 너무 많았어요. 잠시 뒤에 다시 해 주세요.',
+    'auth/network-request-failed': '인터넷 연결을 확인하고 다시 시도해 주세요.',
+    'auth/popup-blocked': '로그인 창이 막혔어요. 브라우저에서 팝업을 허용해 주세요.',
+    'auth/operation-not-allowed': '이 로그인 방법은 아직 켜져 있지 않아요. 사이트 관리자에게 알려 주세요.',
+    'auth/unauthorized-domain': '이 주소는 로그인 허용 목록에 없어요. 사이트 관리자에게 알려 주세요.',
+    'auth/user-disabled': '사용이 중지된 계정이에요.',
+    'auth/invalid-api-key': '로그인 설정(apiKey)이 올바르지 않아요. 사이트 관리자에게 알려 주세요.',
+    'auth/account-exists-with-different-credential': '같은 이메일로 다른 방법을 써서 가입한 계정이 있어요. 원래 방법으로 로그인해 주세요.',
+  };
+  const SILENT = new Set(['auth/popup-closed-by-user', 'auth/cancelled-popup-request', 'auth/user-cancelled']);
+  function authErrorText(err) {
+    const code = (err && err.code) || '';
+    if (AUTH_ERRORS[code]) return AUTH_ERRORS[code];
+    if (code.startsWith('auth/api-key')) return AUTH_ERRORS['auth/invalid-api-key'];
+    return '로그인하지 못했어요. 잠시 뒤에 다시 시도해 주세요.';
+  }
+
+  function authMessage(text, { ok = false } = {}) {
+    const p = $('#auth-msg');
+    p.textContent = text || '';
+    p.classList.toggle('ok', ok);
+    p.hidden = !text;
+    if (text && !ok) shake($('#auth-form'));
+  }
+
+  function setAuthMode(mode, { focus = false } = {}) {
+    state.authMode = mode;
+    const signup = mode === 'signup';
+    $('#auth-tabs').style.setProperty('--tab', signup ? 1 : 0);
+    const tl = $('#auth-tab-login');
+    const ts = $('#auth-tab-signup');
+    tl.setAttribute('aria-selected', String(!signup));
+    ts.setAttribute('aria-selected', String(signup));
+    tl.tabIndex = signup ? -1 : 0;
+    ts.tabIndex = signup ? 0 : -1;
+    if (focus) (signup ? ts : tl).focus();
+    $('#auth-form').setAttribute('aria-labelledby', signup ? 'auth-tab-signup' : 'auth-tab-login');
+    $('#auth-title').textContent = signup ? '회원가입' : '로그인';
+    $('#auth-pw').autocomplete = signup ? 'new-password' : 'current-password';
+    $('#pw-hint').hidden = !signup;
+    $('#forgot-btn').hidden = signup;
+    $('#auth-submit .label-text').textContent = signup ? '가입하고 시작하기' : '로그인';
+    authMessage('');
+    const nick = $('#nick-field');
+    if (nick.hidden === !signup) return;
+    nick.hidden = !signup;
+    if (signup) {
+      M.animate(nick, [{ opacity: 0, transform: 'translateY(-8px) scale(.97)' }, { opacity: 1, transform: 'none' }], {
+        duration: M.SPRING_SOFT.duration,
+        easing: M.SPRING_SOFT.easing,
+      });
+    }
+  }
+
+  function setAuthBusy(btn, on) {
+    btn.setAttribute('aria-busy', on ? 'true' : 'false');
+    $('#auth-fields').disabled = on;
+    $('#google-btn').disabled = on;
+  }
+
+  function resetAuthForm() {
+    $('#auth-form').reset();
+    $('#auth-pw').type = 'password';
+    $('#pw-toggle').textContent = '보기';
+    $('#pw-toggle').setAttribute('aria-pressed', 'false');
+    $('#pw-toggle').setAttribute('aria-label', '비밀번호 보기');
+    setAuthMode('login');
+    setAuthBusy($('#auth-submit'), false);
+  }
+
+  function setNotice(reason) {
+    const box = $('#auth-notice');
+    const blocked = Boolean(reason);
+    box.hidden = !blocked;
+    $('#retry-btn').hidden = reason !== 'load' && reason !== 'timeout';
+    if (reason === 'config') {
+      $('#auth-notice-text').textContent =
+        '아직 로그인 서버(Firebase)가 연결되지 않았어요. 이 사이트를 만든 분이라면 README의 "Firebase 연결하기" 순서대로 js/config.js를 채워 주세요.';
+    } else if (blocked) {
+      $('#auth-notice-text').textContent = '로그인 서비스를 불러오지 못했어요. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.';
+    }
+    $('#auth-fields').disabled = blocked;
+    $('#google-btn').disabled = blocked;
+  }
+
+  const looksLikeEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+
+  async function submitAuth(e) {
+    e.preventDefault();
+    const btn = $('#auth-submit');
+    if (btn.getAttribute('aria-busy') === 'true' || !state.cloud || !state.cloud.ready) return;
+    const email = $('#auth-email').value.trim();
+    const pw = $('#auth-pw').value;
+    const nick = $('#auth-nick').value.trim().slice(0, 12);
+    if (!looksLikeEmail(email)) {
+      authMessage('이메일 주소를 확인해 주세요.');
+      $('#auth-email').focus();
+      return;
+    }
+    if (state.authMode === 'signup' ? pw.length < 6 : !pw) {
+      authMessage(state.authMode === 'signup' ? '비밀번호가 너무 짧아요.' : '비밀번호를 입력해 주세요.');
+      $('#auth-pw').focus();
+      return;
+    }
+    authMessage('');
+    setAuthBusy(btn, true);
+    try {
+      if (state.authMode === 'signup') {
+        state.pendingName = nick;
+        const user = await state.cloud.signUp(email, pw, nick);
+        if (nick && state.user && user && state.user.uid === user.uid) {
+          state.user.name = nick;
+          updateAccount();
+        }
+      } else {
+        await state.cloud.signIn(email, pw);
+      }
+    } catch (err) {
+      state.pendingName = '';
+      authMessage(authErrorText(err));
+    } finally {
+      setAuthBusy(btn, false);
+    }
+  }
+
+  async function googleAuth() {
+    const btn = $('#google-btn');
+    if (!state.cloud || !state.cloud.ready) return;
+    authMessage('');
+    setAuthBusy(btn, true);
+    try {
+      await state.cloud.signInGoogle();
+    } catch (err) {
+      if (!SILENT.has(err && err.code)) authMessage(authErrorText(err));
+    } finally {
+      setAuthBusy(btn, false);
+    }
+  }
+
+  async function forgotPassword() {
+    if (!state.cloud || !state.cloud.ready) return;
+    const email = $('#auth-email').value.trim();
+    if (!looksLikeEmail(email)) {
+      authMessage('비밀번호를 다시 정할 이메일 주소를 위 칸에 먼저 적어 주세요.');
+      $('#auth-email').focus();
+      return;
+    }
+    const btn = $('#forgot-btn');
+    btn.disabled = true;
+    try {
+      await state.cloud.resetPassword(email);
+      authMessage(`${email}로 비밀번호 재설정 메일을 보냈어요. 메일함을 확인해 주세요.`, { ok: true });
+    } catch (err) {
+      authMessage(authErrorText(err));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function showAuth({ notice = null } = {}) {
+    if (state.sheet.open) closeSheet({ restoreFocus: false });
+    Store.end();
+    state.user = null;
+    state.loaded.clear();
+    return go('auth', () => {
+      resetAuthForm();
+      setNotice(notice);
+    }).then(() => {
+      authIntro();
+      state.authLine = 0;
+      setTimeout(() => say(AUTH_LINES[0], { hop: true, who: 'auth' }), M.reduced() ? 0 : 350);
+    });
+  }
+
+  function enterApp(user) {
+    if (state.user && state.user.uid === user.uid) {
+      if (user.name) state.user.name = user.name;
+      updateAccount();
+      return state.nav;
+    }
+    state.user = { uid: user.uid, email: user.email, name: user.name || state.pendingName };
+    state.pendingName = '';
+    Store.begin(state.cloud, user.uid);
+    state.loaded.clear();
+    state.renderedSig = '';
+    state.y = today.getFullYear();
+    state.m = today.getMonth() + 1;
+    state.tab = 'list';
+    prevSummary = { income: 0, expense: 0 };
+    return go(
+      'app',
+      () => {
+        updateAccount();
+        paintTabs();
+        odometer.set(0, { instant: true });
+        $('#balance .sign').textContent = '';
+        $('#sum-in').textContent = '0원';
+        $('#sum-out').textContent = '0원';
+        $('#meter-fill').style.setProperty('--ratio', 0);
+        renderMonthLabel(0);
+        watchMonth(state.y, state.m);
+        renderSummary();
+        renderList();
+        renderStats({ animate: false });
+      },
+      $('#auth-submit')
+    ).then(() => {
+      intro();
+      const key = Store.monthKey(state.y, state.m);
+      if (Store.ready(state.y, state.m)) {
+        state.loaded.add(key);
+        arrive();
+      } else {
+        setTimeout(() => {
+          if (state.screen === 'app' && !Store.ready(state.y, state.m)) say('기록을 불러오는 중이에요. 잠시만요!', { hop: true });
+        }, 500);
+      }
     });
   }
 
@@ -698,10 +1136,7 @@
     const p = $(`#${field}-error`);
     p.textContent = msg;
     p.hidden = false;
-    const box = field === 'amount' ? $('#amount-field') : field === 'cat' ? $('#cats') : $('#date-field');
-    box.classList.remove('shake');
-    void box.offsetWidth;
-    box.classList.add('shake');
+    shake(field === 'amount' ? $('#amount-field') : field === 'cat' ? $('#cats') : $('#date-field'));
   }
   function hideError(field) {
     const p = $(`#${field}-error`);
@@ -709,7 +1144,7 @@
   }
 
   function lockPage(lock) {
-    $('#app').inert = lock;
+    $('#page').inert = lock;
     $('.fab-wrap').inert = lock;
     document.documentElement.style.overflow = lock ? 'hidden' : '';
   }
@@ -721,6 +1156,7 @@
     sh.mode = mode;
     sh.id = entry ? entry.id : null;
     sh.opener = opener;
+    toggleAccountMenu(false);
 
     const layer = $('#sheet-layer');
     const sheet = sheetEl();
@@ -838,6 +1274,7 @@
     const payload = { type: sh.type, cat: sh.cat, amount: sh.amount, date, memo: $('#memo').value };
     const fromRect = $('#save-btn').getBoundingClientRect();
     const mode = sh.mode;
+    busy(1100);
     const entry = mode === 'edit' ? Store.update(sh.id, payload) : Store.add(payload);
     if (!entry) return;
     sh.lastType = sh.type;
@@ -849,6 +1286,7 @@
     if (moved) {
       state.y = ey;
       state.m = em;
+      watchMonth(ey, em);
       renderMonthLabel(dir);
     }
     if (state.tab !== 'list') setTab('list');
@@ -856,10 +1294,9 @@
     setTimeout(() => {
       renderList({ flip: !moved, enterDir: moved ? dir : null, fresh: entry.id });
       renderStats({ animate: false });
-      renderSampleNote();
       const balance = $('#balance');
       const row = $(`.entry[data-id="${CSS.escape(entry.id)}"]`);
-      if (entry.type === 'income' && isVisible(balance) && mode === 'add') {
+      if (entry.type === 'income' && isVisible(balance) && mode === 'add' && Store.ready(state.y, state.m)) {
         M.FX.coinsTo(fromRect, balance, {
           count: 10,
           onArrive: () => {
@@ -869,7 +1306,7 @@
         });
       } else {
         renderSummary();
-        if (isVisible(balance)) {
+        if (isVisible(balance) && Store.ready(state.y, state.m)) {
           pulse(balance);
           if (entry.type === 'expense' && mode === 'add') M.FX.coinBurst(balance, { count: 8 });
         }
@@ -900,6 +1337,7 @@
     const id = state.sheet.id;
     const entry = Store.get(id);
     if (!entry) return;
+    busy(1200);
     closeSheet({ restoreFocus: false });
     const row = $(`.entry[data-id="${CSS.escape(id)}"]`);
     const finish = () => {
@@ -907,7 +1345,6 @@
       renderList({ flip: true });
       renderSummary();
       renderStats({ animate: false });
-      renderSampleNote();
       $('#fab').focus({ preventScroll: true });
     };
     setTimeout(() => {
@@ -920,55 +1357,59 @@
       icon: 'trash',
       action: '되돌리기',
       onAction: () => {
+        busy(900);
         const back = Store.restore(entry);
         const [ry, rm] = back.date.split('-').map(Number);
         if (ry !== state.y || rm !== state.m) {
           const d = monthIndex(ry, rm) > monthIndex(state.y, state.m) ? 1 : -1;
           state.y = ry;
           state.m = rm;
+          watchMonth(ry, rm);
           renderMonthLabel(d);
           renderList({ enterDir: d, fresh: back.id });
         } else renderList({ flip: true, fresh: back.id });
         renderSummary();
         renderStats({ animate: false });
-        renderSampleNote();
         toast('지운 기록을 되살렸어요.', { icon: 'sprout' });
       },
     });
   }
 
-  /* ───────── 전체 그리기 ───────── */
-  function renderAll({ intro = false } = {}) {
-    renderMonthLabel(0);
-    renderSummary({ animate: true, delay: intro ? 420 : 0 });
-    renderList({ enterDir: intro ? 0 : null, delay: intro ? 520 : 0 });
-    renderStats({ animate: false });
-    renderSampleNote();
-  }
-
-  function intro() {
+  /* ───────── 처음 나타나는 움직임 ───────── */
+  function rise(els, base = 60) {
     if (M.reduced()) return;
-    const seq = $$('.topbar, .hero, .talk, #sample-note:not([hidden]), .tabs, .panel:not([hidden])');
-    seq.forEach((el, i) => {
+    els.forEach((el, i) => {
       M.animate(el, [{ opacity: 0, transform: 'translateY(28px) scale(.97)' }, { opacity: 1, transform: 'none' }], {
         duration: M.SPRING_SOFT.duration + 200,
         easing: M.SPRING_SOFT.easing,
-        delay: 60 + i * 90,
+        delay: base + i * 90,
         fill: 'backwards',
       });
     });
+  }
+  function popIn(el, delay) {
+    M.animate(el, [{ transform: 'translateY(30px) scale(.3)', opacity: 0 }, { transform: 'none', opacity: 1 }], {
+      duration: M.SPRING.duration,
+      easing: M.SPRING.easing,
+      delay,
+      fill: 'backwards',
+    });
+  }
+  function intro() {
+    if (M.reduced()) return;
+    rise($$('#app > .hero, #app > .talk, #app > .tabs, #app > .panel:not([hidden])'));
     M.animate($('#fab'), [{ transform: 'scale(0) rotate(-200deg)' }, { transform: 'none' }], {
       duration: M.SPRING.duration + 100,
       easing: M.SPRING.easing,
-      delay: 620,
+      delay: 520,
       fill: 'backwards',
     });
-    M.animate($('#tori'), [{ transform: 'translateY(30px) scale(.3)', opacity: 0 }, { transform: 'none', opacity: 1 }], {
-      duration: M.SPRING.duration,
-      easing: M.SPRING.easing,
-      delay: 330,
-      fill: 'backwards',
-    });
+    popIn($('#tori'), 300);
+  }
+  function authIntro() {
+    if (M.reduced()) return;
+    rise($$('#auth > .talk, #auth > .auth-card'));
+    popIn($('#auth-tori'), 240);
   }
 
   /* ───────── 이벤트 ───────── */
@@ -981,7 +1422,7 @@
 
     $('#tab-list').addEventListener('click', () => setTab('list'));
     $('#tab-stats').addEventListener('click', () => setTab('stats'));
-    $('.tabs').addEventListener('keydown', (e) => {
+    $('#view-tabs').addEventListener('keydown', (e) => {
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
         e.preventDefault();
         const toStats = e.key === 'End' || (e.key !== 'Home' && state.tab === 'list');
@@ -996,8 +1437,14 @@
       nextLine();
     });
 
-    $('#clear-samples').addEventListener('click', clearSamples);
+    // 계정 메뉴
+    $('#account-btn').addEventListener('click', () => toggleAccountMenu());
+    $('#logout-btn').addEventListener('click', logout);
+    document.addEventListener('pointerdown', (e) => {
+      if (!$('#account-menu').hidden && !e.target.closest('#account')) toggleAccountMenu(false);
+    });
 
+    // 기록 시트 열기
     $('#fab').addEventListener('click', (e) => openSheet({ mode: 'add', opener: e.currentTarget }));
     $('#list').addEventListener('click', (e) => {
       const btn = e.target.closest('.entry');
@@ -1062,10 +1509,43 @@
     });
     $('#delete-btn').addEventListener('click', deleteFromSheet);
 
+    // 로그인 화면
+    $('#auth-tab-login').addEventListener('click', () => setAuthMode('login'));
+    $('#auth-tab-signup').addEventListener('click', () => setAuthMode('signup'));
+    $('#auth-tabs').addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
+        e.preventDefault();
+        const toSignup = e.key === 'End' || (e.key !== 'Home' && state.authMode === 'login');
+        setAuthMode(toSignup ? 'signup' : 'login', { focus: true });
+      }
+    });
+    $('#auth-form').addEventListener('submit', submitAuth);
+    $('#google-btn').addEventListener('click', googleAuth);
+    $('#forgot-btn').addEventListener('click', forgotPassword);
+    $('#retry-btn').addEventListener('click', () => window.location.reload());
+    $('#pw-toggle').addEventListener('click', () => {
+      const input = $('#auth-pw');
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      const t = $('#pw-toggle');
+      t.textContent = show ? '숨기기' : '보기';
+      t.setAttribute('aria-pressed', String(show));
+      t.setAttribute('aria-label', show ? '비밀번호 숨기기' : '비밀번호 보기');
+    });
+    $('#auth-bubble').addEventListener('click', nextAuthLine);
+    $('#auth-tori').addEventListener('click', () => {
+      M.FX.sparkles($('#auth-tori'), { count: 6 });
+      nextAuthLine();
+    });
+
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && state.sheet.open) {
+      if (e.key !== 'Escape') return;
+      if (state.sheet.open) {
         e.preventDefault();
         closeSheet();
+      } else if (!$('#account-menu').hidden) {
+        toggleAccountMenu(false);
+        $('#account-btn').focus();
       }
     });
 
@@ -1084,18 +1564,30 @@
       { passive: true }
     );
 
-    // 다른 탭에서 바꾼 기록도 따라갑니다
-    window.addEventListener('storage', (e) => {
-      if (e.key !== Store.KEY) return;
-      Store.load();
-      renderAll();
-      refreshTalk();
-    });
+    Store.onChange(onStoreChange);
+    Store.onError(onStoreError);
   }
 
   /* ───────── 시작 ───────── */
-  function start() {
-    Store.load();
+  function waitForCloud(ms) {
+    return new Promise((resolve) => {
+      if (window.Cloud) {
+        resolve(window.Cloud);
+        return;
+      }
+      const timer = setTimeout(() => resolve({ configured: true, ready: false, reason: 'timeout' }), ms);
+      window.addEventListener(
+        'moa:cloud',
+        () => {
+          clearTimeout(timer);
+          resolve(window.Cloud);
+        },
+        { once: true }
+      );
+    });
+  }
+
+  async function boot() {
     paintSprites();
     odometer = new M.Odometer($('#balance .odo'));
     M.Scene.build(today.getMonth() + 1);
@@ -1104,11 +1596,19 @@
     buildCategoryGrid('expense');
     bind();
     syncTheme();
-    renderAll({ intro: true });
-    intro();
-    state.talk.lines = buildLines();
-    setTimeout(() => say(state.talk.lines[0], { hop: true }), M.reduced() ? 0 : 700);
+    rise([$('.topbar')], 0);
+
+    const cloud = await waitForCloud(20000);
+    state.cloud = cloud;
+    if (!cloud.ready) {
+      showAuth({ notice: cloud.reason || 'load' });
+      return;
+    }
+    cloud.onAuth((user) => {
+      if (user) enterApp(user);
+      else showAuth();
+    });
   }
 
-  start();
+  boot();
 })();
