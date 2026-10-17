@@ -39,7 +39,11 @@
     <div class="page" id="page">
       <header class="topbar">
         <h1 class="brand"><img data-sprite="leaf" data-scale="2" alt="" />모아봐요 가계부</h1>
+        <div class="top-month" id="top-month"></div>
         <div class="top-actions">
+          <button class="icon-btn px px-l" id="layout-btn" type="button" hidden>
+            <img data-sprite="viewPhone" data-scale="2" alt="" />
+          </button>
           <div class="account" id="account" hidden>
             <button class="icon-btn px px-l" id="account-btn" type="button" aria-expanded="false" aria-controls="account-menu" aria-label="내 계정">
               <img data-sprite="user" data-scale="2" alt="" />
@@ -123,99 +127,173 @@
       </section>
 
       <main class="app" id="app" hidden>
+        <section class="card px hero" aria-labelledby="month-title">
+          <div class="month-bar px px-l dotted">
+            <button class="nav-btn px px-m" type="button" data-dir="-1" aria-label="이전 달">
+              <img data-sprite="arrowL" data-scale="2" alt="" />
+            </button>
+            <h2 class="month-label" id="month-title" aria-live="polite"></h2>
+            <button class="nav-btn px px-m" type="button" data-dir="1" aria-label="다음 달">
+              <img data-sprite="arrowR" data-scale="2" alt="" />
+            </button>
+          </div>
 
-      <section class="card px hero" aria-labelledby="month-title">
-        <div class="month-bar px px-l dotted">
-          <button class="nav-btn px px-m" type="button" data-dir="-1" aria-label="이전 달">
-            <img data-sprite="arrowL" data-scale="2" alt="" />
+          <div class="hero-main">
+            <div class="balance">
+              <p class="label" id="balance-label">이번 달 남은 돈</p>
+              <p class="balance-num" id="balance">
+                <span class="sign" aria-hidden="true"></span><span class="odo" aria-hidden="true"></span
+                ><span class="won" aria-hidden="true">원</span><span class="sr-only" id="balance-sr"></span>
+              </p>
+            </div>
+            <div class="now-bal px px-l">
+              <span class="label">현재 잔액</span>
+              <span class="now-val" id="now-val">계산 중…</span>
+              <button class="btn btn-small px" id="adjust-btn" type="button" aria-haspopup="dialog" aria-controls="adjust-dialog">맞추기</button>
+            </div>
+          </div>
+
+          <div class="io">
+            <div class="io-item in px px-l">
+              <img data-sprite="pouch" data-scale="2" alt="" />
+              <span class="label">수입</span>
+              <span class="val" id="sum-in">0원</span>
+            </div>
+            <div class="io-item out px px-l">
+              <img data-sprite="basket" data-scale="2" alt="" />
+              <span class="label">지출</span>
+              <span class="val" id="sum-out">0원</span>
+            </div>
+          </div>
+
+          <div class="meter-wrap">
+            <div class="meter px" id="meter" role="meter" aria-label="수입 대비 지출" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div class="meter-fill px" id="meter-fill"></div>
+            </div>
+            <p class="meter-note" id="meter-note"></p>
+          </div>
+        </section>
+
+        <section class="talk" aria-label="다람쥐 토리의 한마디">
+          <button class="tori" id="tori" type="button" aria-label="토리 쓰다듬기"></button>
+          <button class="bubble px" id="bubble" type="button">
+            <span class="bubble-tail" aria-hidden="true"></span>
+            <span class="name-tag px" aria-hidden="true">토리</span>
+            <span class="talk-text" id="talk-text" aria-hidden="true"></span>
+            <span class="talk-next" aria-hidden="true"></span>
+            <span class="sr-only">토리의 다음 말 듣기</span>
           </button>
-          <h2 class="month-label" id="month-title" aria-live="polite"></h2>
-          <button class="nav-btn px px-m" type="button" data-dir="1" aria-label="다음 달">
-            <img data-sprite="arrowR" data-scale="2" alt="" />
-          </button>
+          <p class="sr-only" id="talk-live" aria-live="polite"></p>
+        </section>
+
+        <div class="tabs px" id="view-tabs" role="tablist" aria-label="보기">
+          <span class="tab-thumb px" aria-hidden="true"></span>
+          <button class="tab" role="tab" type="button" id="tab-list" aria-selected="true" aria-controls="panel-list">내역</button>
+          <button class="tab" role="tab" type="button" id="tab-stats" aria-selected="false" aria-controls="panel-stats" tabindex="-1">달력·통계</button>
         </div>
 
-        <div class="balance">
-          <p class="label" id="balance-label">이번 달 남은 돈</p>
-          <p class="balance-num" id="balance">
-            <span class="sign" aria-hidden="true"></span><span class="odo" aria-hidden="true"></span
-            ><span class="won" aria-hidden="true">원</span><span class="sr-only" id="balance-sr"></span>
-          </p>
-        </div>
-
-        <div class="io">
-          <div class="io-item in px px-l">
-            <img data-sprite="pouch" data-scale="2" alt="" />
-            <span class="label">수입</span>
-            <span class="val" id="sum-in">0원</span>
+        <section class="card px panel list-panel" id="panel-list" role="tabpanel" aria-labelledby="tab-list">
+          <div class="panel-head">
+            <button class="nav-btn px px-m full-only" type="button" data-dir="-1" aria-label="이전 달">
+              <img data-sprite="arrowL" data-scale="2" alt="" />
+            </button>
+            <h2 class="panel-title" id="list-title">내역</h2>
+            <button class="nav-btn px px-m full-only" type="button" data-dir="1" aria-label="다음 달">
+              <img data-sprite="arrowR" data-scale="2" alt="" />
+            </button>
+            <span class="panel-count" id="list-count"></span>
+            <button class="btn btn-small px add-inline" id="list-add" type="button" aria-haspopup="dialog" aria-controls="sheet">
+              <img data-sprite="plus" data-scale="2" alt="" /><span class="t">기록하기</span>
+            </button>
+            <button class="icon-btn px px-l expand-btn" id="list-expand" type="button" aria-expanded="false" aria-label="내역 크게 보기" title="크게 보기">
+              <img data-sprite="expand" data-scale="2" alt="" />
+            </button>
           </div>
-          <div class="io-item out px px-l">
-            <img data-sprite="basket" data-scale="2" alt="" />
-            <span class="label">지출</span>
-            <span class="val" id="sum-out">0원</span>
+          <p class="list-sum full-only" id="list-sum"></p>
+          <div class="list-scroll" id="list-scroll">
+            <div class="panel-inner" id="list"></div>
+            <div class="loading" id="list-loading" hidden>
+              <img data-sprite="leaf" data-scale="3" alt="" />
+              <p id="list-loading-text">기록을 불러오는 중…</p>
+            </div>
+            <div class="empty" id="empty" hidden>
+              <img data-sprite="sprout" data-scale="3" alt="" />
+              <p class="empty-title">이 달에는 아직 기록이 없어요</p>
+              <p class="empty-sub" id="empty-sub">아래 나뭇잎 버튼을 눌러 첫 기록을 남겨 보세요.</p>
+            </div>
           </div>
-        </div>
+        </section>
+        <div class="panel-ghost" id="list-ghost" hidden aria-hidden="true"></div>
 
-        <div class="meter-wrap">
-          <div class="meter px" id="meter" role="meter" aria-label="수입 대비 지출" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-            <div class="meter-fill px" id="meter-fill"></div>
-          </div>
-          <p class="meter-note" id="meter-note"></p>
-        </div>
-      </section>
+        <div class="stats" id="panel-stats" role="tabpanel" aria-labelledby="tab-stats" hidden>
+          <section class="card px cal-card" id="cal-card" aria-labelledby="cal-title">
+            <div class="panel-head">
+              <h2 class="panel-title" id="cal-title">달력</h2>
+              <p class="cal-key" aria-hidden="true"><span class="in">+수입</span><span class="out">−지출</span></p>
+            </div>
+            <div class="card-body">
+              <div class="cal-week" aria-hidden="true">
+                <span class="sun">일</span><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span class="sat">토</span>
+              </div>
+              <div class="cal-grid" id="cal-grid" role="group" aria-labelledby="cal-title"></div>
+              <dl class="cal-foot" id="cal-foot"></dl>
+              <p class="cal-note" id="cal-note">날짜를 누르면 그날 내역으로 가요. 기록이 없는 날은 바로 기록할 수 있어요.</p>
+            </div>
+          </section>
 
-      <section class="talk" aria-label="다람쥐 토리의 한마디">
-        <button class="tori" id="tori" type="button" aria-label="토리 쓰다듬기"></button>
-        <button class="bubble px" id="bubble" type="button">
-          <span class="bubble-tail" aria-hidden="true"></span>
-          <span class="name-tag px" aria-hidden="true">토리</span>
-          <span class="talk-text" id="talk-text" aria-hidden="true"></span>
-          <span class="talk-next" aria-hidden="true"></span>
-          <span class="sr-only">토리의 다음 말 듣기</span>
-        </button>
-        <p class="sr-only" id="talk-live" aria-live="polite"></p>
-      </section>
-
-      <div class="tabs px" id="view-tabs" role="tablist" aria-label="보기">
-        <span class="tab-thumb px" aria-hidden="true"></span>
-        <button class="tab" role="tab" type="button" id="tab-list" aria-selected="true" aria-controls="panel-list">내역</button>
-        <button class="tab" role="tab" type="button" id="tab-stats" aria-selected="false" aria-controls="panel-stats" tabindex="-1">통계</button>
-      </div>
-
-      <section class="card px panel" id="panel-list" role="tabpanel" aria-labelledby="tab-list">
-        <div class="panel-inner" id="list"></div>
-        <div class="loading" id="list-loading" hidden>
-          <img data-sprite="leaf" data-scale="3" alt="" />
-          <p id="list-loading-text">기록을 불러오는 중…</p>
+          <section class="card px pie-card" id="pie-card" aria-labelledby="pie-title">
+            <div class="panel-head">
+              <h2 class="panel-title" id="pie-title">카테고리별</h2>
+              <div class="seg px" role="radiogroup" aria-label="원그래프 종류" data-kind="expense">
+                <span class="seg-thumb px" aria-hidden="true"></span>
+                <label><input type="radio" name="stat-kind" value="expense" checked /><span>지출</span></label>
+                <label><input type="radio" name="stat-kind" value="income" /><span>수입</span></label>
+              </div>
+            </div>
+            <div class="card-body">
+              <figure class="pie-block" id="pie-expense" data-kind="expense">
+                <figcaption class="pie-cap"></figcaption>
+                <div class="pie-body">
+                  <div class="pie-wrap">
+                    <canvas class="pie-canvas" width="48" height="48" aria-hidden="true"></canvas>
+                    <div class="pie-tip px" hidden aria-hidden="true"></div>
+                  </div>
+                  <ol class="legend"></ol>
+                </div>
+                <div class="loading" hidden>
+                  <img data-sprite="leaf" data-scale="3" alt="" />
+                  <p>기록을 불러오는 중…</p>
+                </div>
+                <div class="empty pie-empty" hidden>
+                  <img data-sprite="sprout" data-scale="3" alt="" />
+                  <p class="empty-title">이 달에는 지출 기록이 없어요</p>
+                  <p class="empty-sub">기록이 쌓이면 카테고리별로 모아서 보여 드릴게요.</p>
+                </div>
+              </figure>
+              <figure class="pie-block" id="pie-income" data-kind="income" hidden>
+                <figcaption class="pie-cap"></figcaption>
+                <div class="pie-body">
+                  <div class="pie-wrap">
+                    <canvas class="pie-canvas" width="48" height="48" aria-hidden="true"></canvas>
+                    <div class="pie-tip px" hidden aria-hidden="true"></div>
+                  </div>
+                  <ol class="legend"></ol>
+                </div>
+                <div class="loading" hidden>
+                  <img data-sprite="leaf" data-scale="3" alt="" />
+                  <p>기록을 불러오는 중…</p>
+                </div>
+                <div class="empty pie-empty" hidden>
+                  <img data-sprite="sprout" data-scale="3" alt="" />
+                  <p class="empty-title">이 달에는 수입 기록이 없어요</p>
+                  <p class="empty-sub">기록이 쌓이면 카테고리별로 모아서 보여 드릴게요.</p>
+                </div>
+              </figure>
+            </div>
+          </section>
         </div>
-        <div class="empty" id="empty" hidden>
-          <img data-sprite="sprout" data-scale="3" alt="" />
-          <p class="empty-title">이 달에는 아직 기록이 없어요</p>
-          <p class="empty-sub">아래 나뭇잎 버튼을 눌러 첫 기록을 남겨 보세요.</p>
-        </div>
-      </section>
-
-      <section class="card px panel" id="panel-stats" role="tabpanel" aria-labelledby="tab-stats" hidden>
-        <div class="stats-head">
-          <div class="seg px" role="radiogroup" aria-label="통계 종류" data-kind="expense">
-            <span class="seg-thumb px" aria-hidden="true"></span>
-            <label><input type="radio" name="stat-kind" value="expense" checked /><span>지출</span></label>
-            <label><input type="radio" name="stat-kind" value="income" /><span>수입</span></label>
-          </div>
-          <p class="stats-total" id="stats-total"></p>
-        </div>
-        <ol class="bars" id="bars" data-kind="expense"></ol>
-        <div class="loading" id="stats-loading" hidden>
-          <img data-sprite="leaf" data-scale="3" alt="" />
-          <p>기록을 불러오는 중…</p>
-        </div>
-        <div class="empty" id="stats-empty" hidden>
-          <img data-sprite="sprout" data-scale="3" alt="" />
-          <p class="empty-title" id="stats-empty-title">이 달에는 지출 기록이 없어요</p>
-          <p class="empty-sub">기록이 쌓이면 카테고리별로 모아서 보여 드릴게요.</p>
-        </div>
-      </section>
       </main>
+      <div class="list-scrim" id="list-scrim" hidden></div>
     </div>
 
     <div class="fab-wrap" hidden>
@@ -292,6 +370,38 @@
         </div>
       </form>
     </div>
+
+    <dialog class="adjust" id="adjust-dialog" aria-labelledby="adjust-title">
+      <form class="adjust-box px" id="adjust-form" novalidate>
+        <div class="sheet-band px dotted">
+          <img data-sprite="coin" data-scale="2" alt="" />
+          <h2 id="adjust-title">현재 잔액 맞추기</h2>
+          <button class="icon-btn px px-l" type="button" data-adjust-close aria-label="닫기">
+            <img data-sprite="close" data-scale="2" alt="" />
+          </button>
+        </div>
+        <p class="adjust-help">지금 실제로 가진 돈(통장과 지갑을 합친 금액)을 적어 주세요. 기록은 그대로 두고, 이 금액에 맞게 기록을 시작하기 전의 잔액만 바꿔요.</p>
+        <p class="adjust-calc">기록으로 계산한 현재 잔액 <b id="adjust-calc">계산 중…</b></p>
+        <div class="field">
+          <label class="field-label" for="adjust-amount">실제 잔액</label>
+          <span class="input px adjust-input"
+            ><button type="button" class="sign-btn" id="adjust-sign" aria-pressed="false" aria-label="마이너스 금액">+</button
+            ><input id="adjust-amount" type="text" inputmode="numeric" autocomplete="off" enterkeyhint="done" maxlength="15" aria-describedby="adjust-error" /><span
+              class="unit"
+              aria-hidden="true"
+              >원</span
+            ></span
+          >
+          <p class="field-error" id="adjust-error" hidden></p>
+        </div>
+        <div class="sheet-actions">
+          <button type="button" class="btn px" data-adjust-close>취소</button>
+          <button type="submit" class="btn btn-primary px" id="adjust-save">
+            <img data-sprite="check" data-scale="2" alt="" /><span class="label-text">이 금액으로 맞추기</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
 
     <div class="wipe" id="wipe" hidden aria-hidden="true"><img data-sprite="leaf" data-scale="5" alt="" /></div>
     <div class="toasts" id="toasts" aria-live="polite"></div>

@@ -10,13 +10,13 @@ function announce(api) {
 }
 
 // 로컬에서 ?emulator 로 열면 Firebase 에뮬레이터(auth 9099, firestore 8080)에 붙습니다.
+// 이때는 실제 프로젝트 설정 대신 데모 프로젝트(demo-moa)를 써서 실제 서비스에는 절대 닿지 않게 합니다.
 const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
 const useEmulator = isLocal && new URLSearchParams(location.search).has('emulator');
 
-let config = window.MOA_FIREBASE_CONFIG || {};
-if (useEmulator && !config.apiKey) {
-  config = { apiKey: 'demo-key', authDomain: 'demo-moa.firebaseapp.com', projectId: 'demo-moa', appId: 'demo-app' };
-}
+const config = useEmulator
+  ? { apiKey: 'demo-key', authDomain: 'demo-moa.firebaseapp.com', projectId: 'demo-moa', appId: 'demo-app' }
+  : window.MOA_FIREBASE_CONFIG || {};
 const configured = Boolean(config.apiKey && config.projectId && config.appId);
 
 async function connect() {
@@ -91,9 +91,37 @@ async function connect() {
       const q = fbStore.query(entries(uid), fbStore.where('date', '>=', start), fbStore.where('date', '<', end));
       return fbStore.onSnapshot(
         q,
-        (snap) => onData(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+        (snap) => onData(snap.docs.map((d) => ({ id: d.id, ...d.data() })), { pending: snap.metadata.hasPendingWrites }),
         onError
       );
+    },
+    /** 잔액 계산용: 조건에 맞는 기록의 부호 있는 금액(delta) 합계를 서버에서 셉니다 */
+    async sumDelta(uid, { before, upTo }) {
+      const cond = before ? fbStore.where('date', '<', before) : fbStore.where('date', '<=', upTo);
+      const snap = await fbStore.getAggregateFromServer(fbStore.query(entries(uid), cond), { total: fbStore.sum('delta') });
+      return snap.data().total || 0;
+    },
+    async getProfile(uid) {
+      const snap = await fbStore.getDoc(fbStore.doc(db, 'users', uid));
+      return snap.exists() ? snap.data() : null;
+    },
+    saveProfile(uid, data) {
+      return fbStore.setDoc(fbStore.doc(db, 'users', uid), data, { merge: true });
+    },
+    async allEntries(uid) {
+      const snap = await fbStore.getDocs(entries(uid));
+      return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    },
+    async patchDeltas(uid, items) {
+      for (let i = 0; i < items.length; i += 400) {
+        const batch = fbStore.writeBatch(db);
+        for (const it of items.slice(i, i + 400)) batch.update(fbStore.doc(db, 'users', uid, 'entries', it.id), { delta: it.delta });
+        await batch.commit();
+      }
+    },
+    /** 아직 서버에 닿지 않은 저장이 끝날 때까지 (최대 4초) 기다립니다 */
+    flush() {
+      return Promise.race([fbStore.waitForPendingWrites(db), new Promise((r) => setTimeout(r, 4000))]).catch(() => {});
     },
     put(uid, id, data) {
       return fbStore.setDoc(fbStore.doc(db, 'users', uid, 'entries', id), data);

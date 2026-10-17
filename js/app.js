@@ -1,6 +1,7 @@
 /*
  * 모아봐요 가계부 — 화면 동작
  * 시작(boot) → 로그인(auth) → 가계부(app) 세 화면을 오갑니다.
+ * 가계부는 휴대폰에서는 한 줄로 쌓이고, 넓은 화면(PC)에서는 요약·내역·달력·원그래프를 한 화면에 펼칩니다.
  */
 (function () {
   'use strict';
@@ -15,6 +16,8 @@
   const MINUS = '−';
   const WEEK = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'];
   const TYPE_NAME = { income: '수입', expense: '지출' };
+  const KINDS = ['expense', 'income'];
+  const pad2 = (n) => String(n).padStart(2, '0');
 
   const today = new Date();
   const state = {
@@ -30,13 +33,20 @@
     renderedSig: '',
     busyUntil: 0,
     nav: Promise.resolve(),
-    sheet: { open: false, mode: 'add', id: null, type: 'expense', amount: 0, cat: null, opener: null, origin: null, lastType: 'expense' },
-    talk: { lines: [], idx: 0 },
+    sheet: { open: false, mode: 'add', id: null, type: 'expense', amount: 0, cat: null, opener: null, origin: null, lastType: 'expense', from: null },
+    talk: { lines: [], idx: 0, empty: null }, // empty: 마지막으로 말할 때 이 달이 비어 있었는지
     authMode: 'login',
     authLine: 0,
+    listFull: false, // 내역을 화면 가득 펼쳤는지
+    calFocus: null, // 달력에서 키보드 초점이 머무는 날짜
+    layoutChoice: null, // 'compact'면 넓은 화면에서도 휴대폰처럼
+    otherOpen: { expense: null, income: null }, // 원그래프 '그 외' 펼침 (null이면 화면 배치에 따라)
+    totalsErrShown: false,
   };
   let odometer = null;
   let prevSummary = { income: 0, expense: 0 };
+  let prevCurrent = null;
+  let wide = false; // 넓은 화면 배치인지
 
   /* 받침에 따라 조사 고르기 (예: 식비예요 / 교육이에요) */
   function josa(word, withFinal, withoutFinal) {
@@ -45,6 +55,8 @@
     return code % 28 ? withFinal : withoutFinal;
   }
   const signed = (type, n) => (type === 'income' ? '+' : MINUS) + fmt(n);
+  const won = (n) => `${n < 0 ? MINUS : ''}${fmt(Math.abs(n))}원`;
+  const spokenWon = (n) => `${n < 0 ? '마이너스 ' : ''}${fmt(Math.abs(n))}원`;
   const isCurrentMonth = () => state.y === today.getFullYear() && state.m === today.getMonth() + 1;
   const monthIndex = (y, m) => y * 12 + m;
   const busy = (ms) => {
@@ -55,16 +67,27 @@
     void el.offsetWidth;
     el.classList.add('shake');
   };
+  const flash = (el, cls = 'flash', ms = 1900) => {
+    el.classList.remove(cls);
+    void el.offsetWidth;
+    el.classList.add(cls);
+    clearTimeout(el._flash);
+    el._flash = setTimeout(() => el.classList.remove(cls), ms);
+  };
+  const listVisible = () => wide || state.listFull || state.tab === 'list';
+  const statsVisible = () => wide || (!state.listFull && state.tab === 'stats');
+  const addButton = () => (wide || state.listFull ? $('#list-add') : $('#fab'));
 
   /* ───────── 정적 스프라이트 채우기 ───────── */
+  function setSprite(img, name, scale = 2) {
+    const { w, h } = S.size(name);
+    img.src = S.url(name);
+    img.width = w * scale;
+    img.height = h * scale;
+  }
   function paintSprites(root = document) {
     for (const img of $$('img[data-sprite]', root)) {
-      const name = img.dataset.sprite;
-      const scale = +(img.dataset.scale || 2);
-      const { w, h } = S.size(name);
-      img.src = S.url(name);
-      img.width = w * scale;
-      img.height = h * scale;
+      setSprite(img, img.dataset.sprite, +(img.dataset.scale || 2));
       img.classList.add('px-img');
       img.draggable = false;
     }
@@ -88,6 +111,7 @@
     const meta = $('meta[name="theme-color"]');
     if (meta) meta.content = dark ? '#10173a' : '#8fd8f7';
     M.Ambient.start(today.getMonth() + 1, dark);
+    KINDS.forEach(drawPie); // 원그래프 색은 테마마다 다릅니다
   }
   function toggleTheme() {
     const next = currentTheme() === 'dark' ? 'light' : 'dark';
@@ -103,14 +127,79 @@
     });
   }
 
+  /* ───────── 화면 배치: 넓은 화면(PC)이면 한 화면 대시보드 ─────────
+   * 창 너비가 1200px 이상이면 저절로 넓게 펼치고, 위쪽 버튼으로 휴대폰 배치로 되돌릴 수 있습니다. */
+  const mqWide = window.matchMedia('(min-width: 1200px)');
+  function readLayoutChoice() {
+    try {
+      return localStorage.getItem('moa-layout');
+    } catch {
+      return null;
+    }
+  }
+  function applyLayout() {
+    const can = mqWide.matches;
+    const next = can && state.layoutChoice !== 'compact';
+    const btn = $('#layout-btn');
+    btn.hidden = !can || state.screen !== 'app';
+    btn.setAttribute('aria-label', next ? '좁게 보기: 휴대폰처럼 한 줄로 보기' : '넓게 보기: 한 화면에 모두 보기');
+    btn.title = next ? '좁게 보기' : '넓게 보기';
+    setSprite(btn.querySelector('img'), next ? 'viewPhone' : 'viewWide', 2);
+    if (next === wide) return false;
+    wide = next;
+    document.documentElement.classList.toggle('layout-wide', wide);
+    // 넓은 화면에서는 달 넘기기를 맨 위 가운데로 올립니다
+    const bar = $('.month-bar');
+    if (wide) $('#top-month').appendChild(bar);
+    else $('.hero').prepend(bar);
+    paintTabs();
+    paintStatKind();
+    paintEmptyHint();
+    if (state.screen === 'app') {
+      renderStats({ animate: false });
+      updateFades();
+    }
+    return true;
+  }
+  function toggleLayout() {
+    const goWide = !wide;
+    state.layoutChoice = goWide ? null : 'compact';
+    try {
+      if (state.layoutChoice) localStorage.setItem('moa-layout', state.layoutChoice);
+      else localStorage.removeItem('moa-layout');
+    } catch {
+      /* 저장할 수 없어도 지금 화면은 바뀝니다 */
+    }
+    const run = () => {
+      applyLayout();
+      window.scrollTo(0, 0);
+    };
+    if (document.startViewTransition && !M.reduced()) {
+      const root = document.documentElement;
+      root.classList.add('vt-layout');
+      const t = document.startViewTransition(run);
+      t.finished.finally(() => root.classList.remove('vt-layout'));
+    } else {
+      run();
+      if (goWide) rise($$('#app > .hero, #app > .talk, #panel-list, #cal-card, #pie-card'), 0);
+    }
+    // 화면 전환(View Transition)은 한 박자 늦게 바뀌므로 미리 정한 goWide로 알립니다
+    toast(goWide ? '한 화면에 모두 펼쳐 볼게요.' : '휴대폰처럼 한 줄로 볼게요. 위의 버튼으로 다시 넓게 볼 수 있어요.', {
+      icon: goWide ? 'viewWide' : 'viewPhone',
+      duration: 2600,
+    });
+  }
+
   /* ───────── 화면 전환 ───────── */
   function setScreen(name) {
     state.screen = name;
+    document.documentElement.dataset.screen = name;
     $('#boot').hidden = name !== 'boot';
     $('#auth').hidden = name !== 'auth';
     $('#app').hidden = name !== 'app';
     $('.fab-wrap').hidden = name !== 'app';
     $('#account').hidden = name !== 'app';
+    $('#layout-btn').hidden = name !== 'app' || !mqWide.matches;
     if (name !== 'app') toggleAccountMenu(false);
   }
 
@@ -205,6 +294,7 @@
     const ready = Store.ready(state.y, state.m);
     $('.hero').classList.toggle('is-loading', !ready);
     $('#balance-label').textContent = isCurrentMonth() ? '이번 달 남은 돈' : `${state.m}월 남은 돈`;
+    paintCurrent();
     if (!ready) {
       $('#meter-note').textContent = '기록을 불러오는 중…';
       return;
@@ -255,6 +345,33 @@
     $('#meter-note').textContent = note;
   }
 
+  /* 처음부터 이어지는 현재 잔액 (오늘까지의 모든 기록 + 시작 잔액) */
+  function paintCurrent() {
+    const v = Store.current();
+    const el = $('#now-val');
+    const inList = $('#list-now');
+    if (v === null) {
+      el.textContent = Store.totalsFailed ? '계산 못 함' : '계산 중…';
+      el.classList.add('is-pending');
+      el.classList.remove('is-neg');
+      if (inList) inList.textContent = '…';
+      prevCurrent = null;
+      return;
+    }
+    el.classList.remove('is-pending');
+    el.classList.toggle('is-neg', v < 0);
+    if (inList) {
+      inList.textContent = won(v);
+      inList.classList.toggle('neg', v < 0);
+    }
+    if (v === prevCurrent) return; // 같은 값이면 굴러가던 숫자를 그대로 둡니다
+    if (prevCurrent !== null) {
+      M.countUp(el, prevCurrent, v, { format: won, duration: 700 });
+      pulse(el);
+    } else el.textContent = won(v);
+    prevCurrent = v;
+  }
+
   function pulse(el) {
     el.classList.remove('pulse');
     void el.offsetWidth;
@@ -287,13 +404,80 @@
       memo.textContent = e.memo;
       main.appendChild(memo);
     }
+    const right = document.createElement('span');
+    right.className = 'e-right';
     const amt = document.createElement('span');
     amt.className = 'e-amt ' + (e.type === 'income' ? 'in' : 'out');
     amt.textContent = signed(e.type, e.amount) + '원';
-    btn.append(img, main, amt);
-    btn.setAttribute('aria-label', `${c.name} ${TYPE_NAME[e.type]} ${fmt(e.amount)}원${e.memo ? ', ' + e.memo : ''}. 눌러서 고치기`);
+    const bal = document.createElement('span');
+    bal.className = 'e-bal is-pending';
+    bal.textContent = '잔액 …';
+    right.append(amt, bal);
+    btn.append(img, main, right);
+    btn.dataset.label = `${c.name} ${TYPE_NAME[e.type]} ${fmt(e.amount)}원${e.memo ? ', ' + e.memo : ''}`;
+    btn.setAttribute('aria-label', `${btn.dataset.label}. 눌러서 고치기`);
     li.appendChild(btn);
     return li;
+  }
+
+  /* 기록마다 '그 기록 직후의 잔액'을 채웁니다. 합계가 아직 없으면 자리만 둡니다. */
+  function paintBalances() {
+    if (state.screen !== 'app' || !Store.ready(state.y, state.m)) return;
+    const map = Store.balances(state.y, state.m);
+    for (const btn of $$('#list .entry[data-id]')) {
+      const el = btn.querySelector('.e-bal');
+      const v = map ? map.get(btn.dataset.id) : undefined;
+      if (v === undefined) {
+        el.textContent = Store.totalsFailed ? '잔액 —' : '잔액 …';
+        el.classList.add('is-pending');
+        el.classList.remove('is-neg');
+        btn.setAttribute('aria-label', `${btn.dataset.label}. 눌러서 고치기`);
+        continue;
+      }
+      el.textContent = `잔액 ${won(v)}`;
+      el.classList.remove('is-pending');
+      el.classList.toggle('is-neg', v < 0);
+      btn.setAttribute('aria-label', `${btn.dataset.label}, 거래 후 잔액 ${spokenWon(v)}. 눌러서 고치기`);
+    }
+  }
+
+  function renderListHead() {
+    const ready = Store.ready(state.y, state.m);
+    const yr = state.y !== today.getFullYear() ? `${state.y}년 ` : '';
+    $('#list-title').textContent = `${state.listFull ? yr : ''}${state.m}월 내역`;
+    const n = ready ? Store.month(state.y, state.m).length : 0;
+    $('#list-count').textContent = n ? `${n}건` : '';
+    const sum = $('#list-sum');
+    sum.textContent = '';
+    if (!ready) return;
+    const s = Store.summary(state.y, state.m);
+    const part = (label, value, cls, id) => {
+      const span = document.createElement('span');
+      const b = document.createElement('b');
+      b.className = cls;
+      if (id) b.id = id;
+      b.textContent = value;
+      span.append(`${label} `, b);
+      sum.appendChild(span);
+    };
+    part('기록', `${n}건`, '');
+    part('수입', s.income ? `+${fmt(s.income)}원` : '0원', 'in');
+    part('지출', s.expense ? `${MINUS}${fmt(s.expense)}원` : '0원', 'out');
+    const cur = Store.current();
+    part('현재 잔액', cur === null ? '…' : won(cur), cur !== null && cur < 0 ? 'neg' : '', 'list-now');
+  }
+
+  function paintEmptyHint() {
+    $('#empty-sub').textContent =
+      wide || state.listFull ? '기록하기 버튼을 눌러 첫 기록을 남겨 보세요.' : '아래 나뭇잎 버튼을 눌러 첫 기록을 남겨 보세요.';
+  }
+
+  /* 내역 칸에 위·아래로 더 볼 것이 있으면 가장자리를 흐리게 합니다 */
+  function updateFades() {
+    const sc = $('#list-scroll');
+    const max = sc.scrollHeight - sc.clientHeight;
+    sc.classList.toggle('fade-top', max > 2 && sc.scrollTop > 2);
+    sc.classList.toggle('fade-bottom', max > 2 && max - sc.scrollTop > 2);
   }
 
   function flipKey(el) {
@@ -309,11 +493,13 @@
     const list = $('#list');
     const ready = Store.ready(state.y, state.m);
     $('#list-loading').hidden = ready;
+    renderListHead();
     if (!ready) {
       list.textContent = '';
       $('#empty').hidden = true;
       $('#list-loading-text').textContent = '기록을 불러오는 중…';
       state.renderedSig = 'loading';
+      updateFades();
       return;
     }
     const entries = Store.month(state.y, state.m);
@@ -353,6 +539,7 @@
       list.appendChild(day);
     }
     state.renderedSig = Store.signature(state.y, state.m);
+    paintBalances();
 
     if (flip) playFlip(list, before, fresh);
     else if (enterDir !== null) cascade(list, enterDir, delay);
@@ -363,6 +550,7 @@
         setTimeout(() => el.classList.remove('fresh'), 1900);
       }
     }
+    updateFades();
   }
 
   function playFlip(root, before, freshId) {
@@ -422,69 +610,615 @@
     return a.finished.catch(() => {});
   }
 
-  /* ───────── 통계 ───────── */
-  function renderStats({ animate = true } = {}) {
-    const kind = state.statKind;
-    const ready = Store.ready(state.y, state.m);
-    const bars = $('#bars');
-    const totalEl = $('#stats-total');
-    bars.dataset.kind = kind;
-    bars.textContent = '';
-    totalEl.textContent = '';
-    $('#stats-loading').hidden = ready;
-    if (!ready) {
-      $('#stats-empty').hidden = true;
+  /* 그 기록이 내역 칸(과 화면) 안에 보이도록 굴립니다 */
+  function revealRow(row) {
+    const sc = $('#list-scroll');
+    const r = row.getBoundingClientRect();
+    const b = sc.getBoundingClientRect();
+    const inBox = r.top >= b.top && r.bottom <= b.bottom;
+    const onScreen = r.top >= 0 && r.bottom <= innerHeight;
+    if (!inBox || !onScreen) row.scrollIntoView({ block: 'nearest', behavior: M.reduced() ? 'auto' : 'smooth' });
+  }
+
+  /* 달력에서 고른 날짜의 내역으로 갑니다 */
+  function goToDay(iso) {
+    if (!wide && state.tab !== 'list') setTab('list');
+    requestAnimationFrame(() => {
+      const head = $(`#list .day-head[data-key="${iso}"]`);
+      if (!head) return;
+      const sc = $('#list-scroll');
+      const top = head.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop - 4;
+      const behavior = M.reduced() ? 'auto' : 'smooth';
+      sc.scrollTo({ top, behavior });
+      if (!wide && !state.listFull) {
+        const p = $('#panel-list').getBoundingClientRect();
+        if (p.top < 0 || p.top > innerHeight * 0.45) $('#panel-list').scrollIntoView({ block: 'start', behavior });
+      }
+      flash(head.parentElement);
+    });
+  }
+
+  /* ───────── 내역 크게 보기 (화면 가득) ───────── */
+  function setListFull(on, { animate = true } = {}) {
+    if (state.listFull === on) return;
+    const panel = $('#panel-list');
+    const ghost = $('#list-ghost');
+    const scrim = $('#list-scrim');
+    const btn = $('#list-expand');
+    const others = [$('.topbar'), ...$$('#app > *').filter((el) => el !== panel && el !== ghost)];
+    const anim = animate && !M.reduced();
+    panel.getAnimations().forEach((a) => a.cancel());
+    scrim.getAnimations().forEach((a) => a.cancel());
+    state.listFull = on;
+    document.documentElement.classList.toggle('list-full', on);
+    setSprite(btn.querySelector('img'), on ? 'shrink' : 'expand', 2);
+    btn.setAttribute('aria-expanded', String(on));
+    btn.setAttribute('aria-label', on ? '내역 작게 보기' : '내역 크게 보기');
+    btn.title = on ? '작게 보기' : '크게 보기';
+    paintEmptyHint();
+    syncScrollLock();
+
+    if (on) {
+      const from = panel.getBoundingClientRect();
+      ghost.style.setProperty('--ghost-h', `${from.height}px`);
+      ghost.hidden = false;
+      panel.classList.add('is-full');
+      scrim.hidden = false;
+      others.forEach((el) => (el.inert = true));
+      renderListHead();
+      updateFades();
+      if (anim) {
+        const to = panel.getBoundingClientRect();
+        const clip = `inset(${from.top - to.top}px ${to.right - from.right}px ${to.bottom - from.bottom}px ${from.left - to.left}px)`;
+        M.animate(panel, [{ clipPath: clip }, { clipPath: 'inset(0px)' }], { duration: 480, easing: M.EASE_OUT });
+        M.animate(scrim, [{ opacity: 0 }, { opacity: 1 }], { duration: 300 });
+      }
+      btn.focus({ preventScroll: true });
       return;
     }
+
+    const finish = () => {
+      if (state.listFull) return;
+      panel.classList.remove('is-full');
+      ghost.hidden = true;
+      scrim.hidden = true;
+      panel.getAnimations().forEach((a) => a.cancel());
+      scrim.getAnimations().forEach((a) => a.cancel());
+      others.forEach((el) => (el.inert = false));
+      renderListHead();
+      updateFades();
+    };
+    if (anim && !ghost.hidden) {
+      const from = panel.getBoundingClientRect();
+      const to = ghost.getBoundingClientRect();
+      const clip = `inset(${to.top - from.top}px ${from.right - to.right}px ${from.bottom - to.bottom}px ${to.left - from.left}px)`;
+      const a = M.animate(panel, [{ clipPath: 'inset(0px)' }, { clipPath: clip }], { duration: 300, easing: M.EASE_IN, fill: 'forwards' });
+      M.animate(scrim, [{ opacity: 1 }, { opacity: 0 }], { duration: 300, fill: 'forwards' });
+      a.finished.then(finish, finish);
+    } else finish();
+    if (state.screen === 'app') btn.focus({ preventScroll: true });
+  }
+
+  /* ───────── 달력 ───────── */
+  const dayISO = (d) => `${state.y}-${pad2(state.m)}-${pad2(d)}`;
+
+  function renderCalendar({ animate = false, dir = 0 } = {}) {
+    const grid = $('#cal-grid');
+    const ready = Store.ready(state.y, state.m);
+    const key = Store.monthKey(state.y, state.m);
+    $('#cal-title').textContent = `${state.m}월 달력`;
+    grid.classList.toggle('is-loading', !ready);
+    grid.setAttribute('aria-busy', String(!ready));
+    const days = new Date(state.y, state.m, 0).getDate();
+    const lead = new Date(state.y, state.m - 1, 1).getDay();
+    const cells = Math.ceil((lead + days) / 7) * 7;
+    const byDay = ready ? Store.byDay(state.y, state.m) : new Map();
+    const todayISO = Store.todayISO();
+    if (!state.calFocus || state.calFocus.slice(0, 7) !== key) state.calFocus = todayISO.slice(0, 7) === key ? todayISO : dayISO(1);
+
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < cells; i++) {
+      const d = i - lead + 1;
+      if (d < 1 || d > days) {
+        const blank = document.createElement('span');
+        blank.className = 'cal-blank';
+        blank.setAttribute('aria-hidden', 'true');
+        frag.appendChild(blank);
+        continue;
+      }
+      const iso = dayISO(d);
+      const info = byDay.get(iso);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'cal-day px';
+      btn.dataset.date = iso;
+      btn.dataset.day = String(d);
+      btn.tabIndex = iso === state.calFocus ? 0 : -1;
+      const num = document.createElement('span');
+      num.className = 'd';
+      num.textContent = String(d);
+      btn.appendChild(num);
+      const isToday = iso === todayISO;
+      if (isToday) btn.classList.add('today');
+      let label = `${state.m}월 ${d}일 ${WEEK[(lead + d - 1) % 7]}${isToday ? ', 오늘' : ''}`;
+      if (info) {
+        btn.classList.add('has');
+        const amts = document.createElement('span');
+        amts.className = 'amts';
+        const parts = [];
+        if (info.income) {
+          const s = document.createElement('span');
+          s.className = 'ci';
+          s.dataset.n = String(info.income);
+          amts.appendChild(s);
+          parts.push(`수입 ${fmt(info.income)}원`);
+        }
+        if (info.expense) {
+          const s = document.createElement('span');
+          s.className = 'co';
+          s.dataset.n = String(info.expense);
+          amts.appendChild(s);
+          parts.push(`지출 ${fmt(info.expense)}원`);
+        }
+        btn.appendChild(amts);
+        label += `, ${parts.join(', ')}, ${info.count}건. 눌러서 그날 내역 보기`;
+      } else if (ready) {
+        label += ', 기록 없음. 눌러서 이 날짜로 기록하기';
+      }
+      btn.setAttribute('aria-label', label);
+      frag.appendChild(btn);
+    }
+    grid.textContent = '';
+    grid.appendChild(frag);
+    fitCalendar();
+    renderCalFoot(byDay, ready);
+
+    if (animate && !M.reduced()) {
+      M.animate(grid, [{ opacity: 0, transform: dir ? `translateX(${dir * 24}px)` : 'translateY(10px)' }, { opacity: 1, transform: 'none' }], {
+        duration: M.SPRING_SOFT.duration,
+        easing: M.SPRING_SOFT.easing,
+      });
+      $$('.cal-day.has .amts', grid).forEach((el, i) => {
+        M.animate(el, [{ opacity: 0, transform: 'translateY(6px) scale(.7)' }, { opacity: 1, transform: 'none' }], {
+          duration: M.SPRING.duration,
+          easing: M.SPRING.easing,
+          delay: 140 + Math.min(i, 20) * 22,
+          fill: 'backwards',
+        });
+      });
+    }
+  }
+
+  /* 금액을 칸 너비에 맞게 줄여 씁니다. 한 달력 안에서는 모두 같은 방식으로 씁니다.
+   * 0: 152,000  1: 15.2만  2: 15만·4.8천  3: 15만·5천 */
+  let measureCtx = null;
+  function textWidth(text, font) {
+    if (!measureCtx) measureCtx = document.createElement('canvas').getContext('2d');
+    measureCtx.font = font;
+    return measureCtx.measureText(text).width;
+  }
+  function calAmount(n, level) {
+    const short = (v, digits) => String(+v.toFixed(digits));
+    if (level === 0) return fmt(n);
+    if (level === 1) {
+      if (n >= 1e8) return `${short(n / 1e8, 2)}억`;
+      if (n >= 1e4) return `${short(n / 1e4, 1)}만`;
+      return fmt(n);
+    }
+    if (level === 2) {
+      if (n >= 1e8) return `${short(n / 1e8, 1)}억`;
+      if (n >= 1e4) return `${Math.round(n / 1e4)}만`;
+      if (n >= 1e3) return `${short(n / 1e3, 1)}천`;
+      return String(n);
+    }
+    if (n >= 1e8) return `${Math.round(n / 1e8)}억`;
+    if (n >= 1e4) return `${Math.round(n / 1e4)}만`;
+    if (n >= 1e3) return `${Math.round(n / 1e3)}천`;
+    return String(n);
+  }
+  function fitCalendar() {
+    const grid = $('#cal-grid');
+    const cell = grid.querySelector('.cal-day');
+    const amts = grid.querySelector('.amts');
+    if (!cell || !amts) return;
+    const cs = getComputedStyle(cell);
+    const avail = cell.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    if (avail <= 0) return; // 아직 화면에 없음
+    const fs = getComputedStyle(amts);
+    const font = `${fs.fontWeight} ${fs.fontSize} ${fs.fontFamily}`;
+    // 달력 칸은 좁아서 폭이 좁은 붙임표(-)를 빼기 기호로 씁니다
+    const items = $$('.ci, .co', grid).map((el) => ({ el, n: +el.dataset.n, sign: el.classList.contains('ci') ? '+' : '-' }));
+    let level = 0;
+    while (level < 3 && items.some((it) => textWidth(it.sign + calAmount(it.n, level), font) > avail + 0.5)) level++;
+    for (const it of items) it.el.textContent = it.sign + calAmount(it.n, level);
+    grid.dataset.level = String(level);
+  }
+
+  /* 달력 아래 요약: 하루 평균 지출, 가장 많이 쓴 날, 지출 없는 날 */
+  function renderCalFoot(byDay, ready) {
+    const foot = $('#cal-foot');
+    foot.textContent = '';
+    if (!ready) return;
+    const days = new Date(state.y, state.m, 0).getDate();
+    const viewed = monthIndex(state.y, state.m);
+    const now = monthIndex(today.getFullYear(), today.getMonth() + 1);
+    // 지난 달은 한 달 전체, 이번 달은 오늘까지, 다음 달부터는 아직 지나지 않았습니다
+    const elapsed = viewed < now ? days : viewed === now ? new Date().getDate() : 0;
+    let spent = 0;
+    let top = null;
+    let free = 0;
+    for (let d = 1; d <= days; d++) {
+      const info = byDay.get(dayISO(d));
+      const out = info ? info.expense : 0;
+      if (d <= elapsed) {
+        spent += out;
+        if (!out) free++;
+      }
+      if (out && (!top || out > top.out)) top = { d, out };
+    }
+    const item = (term, value, note) => {
+      const box = document.createElement('div');
+      box.className = 'px';
+      const dt = document.createElement('dt');
+      dt.textContent = term;
+      const dd = document.createElement('dd');
+      dd.textContent = value;
+      if (note) {
+        const small = document.createElement('small');
+        small.textContent = note;
+        dd.appendChild(small);
+      }
+      box.append(dt, dd);
+      foot.appendChild(box);
+    };
+    item('하루 평균 지출', elapsed ? won(Math.round(spent / elapsed)) : '—', elapsed ? `${elapsed}일 기준` : '아직 지나지 않은 달');
+    item(
+      '가장 많이 쓴 날',
+      top ? `${state.m}월 ${top.d}일` : '—',
+      top ? `${MINUS}${fmt(top.out)}원` : '지출 기록 없음'
+    );
+    item('지출 없는 날', elapsed ? `${free}일` : '—', elapsed ? `지난 ${elapsed}일 중` : '');
+  }
+  function focusCalDay(d) {
+    state.calFocus = dayISO(d);
+    for (const b of $$('#cal-grid .cal-day')) b.tabIndex = b.dataset.date === state.calFocus ? 0 : -1;
+    const el = $(`#cal-grid .cal-day[data-day="${d}"]`);
+    if (el) el.focus();
+  }
+  function flashCalDay(iso) {
+    const cell = $(`#cal-grid .cal-day[data-date="${iso}"]`);
+    if (!cell || !statsVisible()) return;
+    flash(cell);
+    M.FX.sparkles(cell, { count: 6 });
+  }
+
+  /* ───────── 원그래프 ─────────
+   * 낮은 해상도 캔버스에 화소를 하나씩 찍고 3배로 키워서 픽셀 그림처럼 보이게 합니다.
+   * 큰 순서대로 다섯 조각에 색을 주고, 나머지는 회색 '그 외'로 묶습니다. 조각 사이에는 틈을 둡니다. */
+  const PIE_SLOTS = 5;
+  const pies = { expense: null, income: null };
+
+  function parseColor(v) {
+    let m = /^#([0-9a-f]{6})$/i.exec(v);
+    if (m) {
+      const n = parseInt(m[1], 16);
+      return [n >> 16, (n >> 8) & 255, n & 255, 255];
+    }
+    m = /^rgba?\(([^)]+)\)$/i.exec(v);
+    if (m) {
+      const p = m[1].split(/[\s,/]+/).filter(Boolean).map(parseFloat);
+      return [p[0], p[1], p[2], Math.round((p.length > 3 ? p[3] : 1) * 255)];
+    }
+    return [160, 150, 140, 255];
+  }
+  const cssColor = (name) => parseColor(getComputedStyle(document.documentElement).getPropertyValue(name).trim());
+
+  function pieData(kind) {
     const rows = Store.byCategory(state.y, state.m, kind);
     const total = rows.reduce((a, r) => a + r.sum, 0);
     const count = rows.reduce((a, r) => a + r.count, 0);
-    if (total) {
-      totalEl.append(`${TYPE_NAME[kind]} 합계 `);
-      const b = document.createElement('b');
-      b.textContent = `${fmt(total)}원`;
-      totalEl.append(b, ` · ${count}건`);
+    let slices = rows.map((r, i) => ({ cat: r.cat, sum: r.sum, count: r.count, color: `--pie-${i + 1}` }));
+    if (rows.length > PIE_SLOTS) {
+      const rest = rows.slice(PIE_SLOTS);
+      slices = slices.slice(0, PIE_SLOTS);
+      slices.push({
+        other: rest,
+        sum: rest.reduce((a, r) => a + r.sum, 0),
+        count: rest.reduce((a, r) => a + r.count, 0),
+        color: '--pie-other',
+      });
     }
-    $('#stats-empty').hidden = rows.length > 0;
-    $('#stats-empty-title').textContent = `이 달에는 ${TYPE_NAME[kind]} 기록이 없어요`;
-    const max = rows.length ? rows[0].sum : 1;
-    rows.forEach((r, i) => {
-      const pct = (r.sum / total) * 100;
+    // 12시 방향에서 시계 방향으로 큰 조각부터
+    let a = 0;
+    for (const s of slices) {
+      s.start = a;
+      a += (s.sum / total) * Math.PI * 2;
+      s.end = a;
+    }
+    return { rows, slices, total, count };
+  }
+
+  const pct = (n, total) => {
+    const p = (n / total) * 100;
+    return p < 1 ? '<1%' : `${Math.round(p)}%`;
+  };
+
+  function textSpan(cls, text) {
+    const s = document.createElement('span');
+    if (cls) s.className = cls;
+    s.textContent = text;
+    return s;
+  }
+
+  function renderLegend(block, kind, pie) {
+    const ol = $('.legend', block);
+    ol.textContent = '';
+    ol.setAttribute('aria-label', `${TYPE_NAME[kind]} 카테고리별 금액`);
+    pie.slices.forEach((s, i) => {
       const li = document.createElement('li');
-      li.className = 'bar-row';
-      li.innerHTML =
-        `<img class="px-img" alt="" width="32" height="32" src="${S.url(r.cat.icon)}">` +
-        '<div class="bar-body"><div class="bar-top"><span class="bar-name"></span><span class="bar-val"></span></div>' +
-        '<div class="bar-track px"><div class="bar-fill px"></div></div></div>';
-      const name = li.querySelector('.bar-name');
-      name.textContent = r.cat.name;
-      const cnt = document.createElement('span');
-      cnt.className = 'bar-count';
-      cnt.textContent = `${r.count}건`;
-      name.appendChild(cnt);
-      const val = li.querySelector('.bar-val');
-      val.textContent = `${fmt(r.sum)}원`;
-      const em = document.createElement('em');
-      em.textContent = pct < 1 ? '1% 미만' : `${Math.round(pct)}%`;
-      val.appendChild(em);
-      const fill = li.querySelector('.bar-fill');
-      fill.style.setProperty('--w', (r.sum / max).toFixed(4));
-      bars.appendChild(li);
-      if (animate) {
-        M.animate(fill, [{ transform: 'scaleX(0)' }, { transform: 'none' }], {
-          duration: 900,
-          delay: 120 + i * 70,
-          easing: M.SPRING_SOFT.easing,
-          fill: 'backwards',
-        });
-        M.animate(li, [{ opacity: 0, transform: 'translateY(10px)' }, { opacity: 1, transform: 'none' }], {
+      li.className = 'lg-row px';
+      li.dataset.i = String(i);
+      li.style.setProperty('--sw', `var(${s.color})`);
+      const sw = document.createElement('span');
+      sw.className = 'lg-sw';
+      let icon;
+      if (s.other) icon = document.createElement('span');
+      else {
+        icon = document.createElement('img');
+        icon.className = 'px-img';
+        icon.alt = '';
+        icon.width = 16;
+        icon.height = 16;
+        icon.src = S.url(s.cat.icon);
+      }
+      const name = document.createElement('span');
+      name.className = 'lg-name';
+      name.append(textSpan('', s.other ? `그 외 ${s.other.length}개` : s.cat.name));
+      const small = document.createElement('small');
+      small.textContent = `${s.count}건`;
+      name.appendChild(small);
+      li.append(sw, icon, name, textSpan('lg-amt', `${fmt(s.sum)}원`), textSpan('lg-pct', pct(s.sum, pie.total)));
+      if (s.other) {
+        // 넓은 화면에서 칸이 넘치면 접어 둡니다 (autoFoldLegend). 직접 펼치거나 접은 뒤에는 그대로 둡니다.
+        const open = state.otherOpen[kind] !== false;
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.className = 'lg-more';
+        more.setAttribute('aria-expanded', String(open));
+        more.setAttribute('aria-controls', `lg-sub-${kind}`);
+        more.dataset.closed = `${s.other.map((r) => r.cat.name).slice(0, 2).join(', ')}${s.other.length > 2 ? ' 등' : ''} 펼치기`;
+        more.textContent = open ? '접기' : more.dataset.closed;
+        li.appendChild(more);
+        const sub = document.createElement('ul');
+        sub.className = 'lg-sub';
+        sub.id = `lg-sub-${kind}`;
+        sub.hidden = !open;
+        for (const r of s.other) {
+          const row = document.createElement('li');
+          row.append(textSpan('', `${r.cat.name} ${r.count}건`), textSpan('', `${fmt(r.sum)}원`), textSpan('', pct(r.sum, pie.total)));
+          sub.appendChild(row);
+        }
+        li.appendChild(sub);
+      }
+      ol.appendChild(li);
+    });
+  }
+
+  function renderPie(kind, { animate = false } = {}) {
+    const block = $(`#pie-${kind}`);
+    const ready = Store.ready(state.y, state.m);
+    const prev = pies[kind];
+    if (prev && prev.raf) cancelAnimationFrame(prev.raf);
+    const pie = Object.assign({ slices: [], rows: [], total: 0, count: 0 }, ready ? pieData(kind) : null, { sweep: 1, active: -1, raf: 0 });
+    pies[kind] = pie;
+    const empty = ready && !pie.total;
+    $('.loading', block).hidden = ready;
+    $('.pie-empty', block).hidden = !empty;
+    $('.pie-body', block).hidden = !ready || empty;
+    const cap = $('.pie-cap', block);
+    cap.textContent = '';
+    cap.append(textSpan('k', TYPE_NAME[kind]));
+    if (pie.total) {
+      const b = document.createElement('b');
+      b.textContent = `${fmt(pie.total)}원`;
+      cap.append(b, textSpan('', `${pie.count}건 · ${pie.rows.length}개 카테고리`));
+    }
+    renderLegend(block, kind, pie);
+    hideTip(kind);
+    if (!pie.total) return;
+    if (animate && !M.reduced()) {
+      sweepPie(kind);
+      $$('.lg-row', block).forEach((el, i) => {
+        M.animate(el, [{ opacity: 0, transform: 'translateX(-10px)' }, { opacity: 1, transform: 'none' }], {
           duration: 420,
-          delay: 40 + i * 70,
+          delay: 160 + i * 60,
           easing: M.EASE_OUT,
           fill: 'backwards',
         });
+      });
+    } else drawPie(kind);
+  }
+
+  /* 화소 하나가 어느 조각에 속하는지: -1 바깥, -2 조각 사이 틈 */
+  function pieGeometry(N) {
+    return { c: N / 2, cy: N / 2 - 0.5, R: N / 2 - 2 };
+  }
+  function drawPie(kind) {
+    const pie = pies[kind];
+    if (!pie || !pie.total) return;
+    const canvas = $(`#pie-${kind} .pie-canvas`);
+    const css = canvas.clientWidth;
+    if (!css) return; // 지금은 안 보임 (탭이 닫혀 있음)
+    const N = Math.max(24, Math.round(css / 3));
+    if (canvas.width !== N) {
+      canvas.width = N;
+      canvas.height = N;
+    }
+    const ctx = canvas.getContext('2d');
+    const img = ctx.createImageData(N, N);
+    const px = img.data;
+    const colors = pie.slices.map((s) => cssColor(s.color));
+    const shadow = cssColor('--shadow');
+    const { c, cy, R } = pieGeometry(N);
+    const TAU = Math.PI * 2;
+    const sweep = pie.sweep * TAU;
+    const slices = pie.slices;
+    const bounds = slices.length > 1 ? slices.map((s) => s.start) : [];
+    const act = pie.active;
+    let ox = 0;
+    let oy = 0;
+    if (act >= 0) {
+      const mid = (slices[act].start + slices[act].end) / 2;
+      ox = Math.round(Math.sin(mid) * 1.7);
+      oy = Math.round(-Math.cos(mid) * 1.7);
+    }
+    const at = (x, y) => {
+      const dx = x + 0.5 - c;
+      const dy = y + 0.5 - cy;
+      const r = Math.hypot(dx, dy);
+      if (r > R) return -1;
+      let a = Math.atan2(dx, -dy);
+      if (a < 0) a += TAU;
+      if (a > sweep) return -1;
+      if (r > 1.2) {
+        for (const b of bounds) {
+          let d = Math.abs(a - b);
+          if (d > Math.PI) d = TAU - d;
+          if (d < Math.PI / 2 && r * Math.sin(d) < 0.55) return -2;
+        }
       }
-    });
+      for (let i = 0; i < slices.length; i++) if (a < slices[i].end) return i;
+      return slices.length - 1;
+    };
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const o = (y * N + x) * 4;
+        let idx = -1;
+        if (act >= 0 && at(x - ox, y - oy) === act) idx = act;
+        if (idx < 0) {
+          const k = at(x, y);
+          if (k >= 0 && k !== act) idx = k;
+          else if (k === -1 && at(x, y - 1) !== -1) {
+            // 원 아래쪽 한 칸 그림자 (카드의 두께와 같은 느낌)
+            px[o] = shadow[0];
+            px[o + 1] = shadow[1];
+            px[o + 2] = shadow[2];
+            px[o + 3] = shadow[3];
+            continue;
+          }
+        }
+        if (idx < 0) continue;
+        const col = colors[idx];
+        px[o] = col[0];
+        px[o + 1] = col[1];
+        px[o + 2] = col[2];
+        px[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+  function sweepPie(kind) {
+    const pie = pies[kind];
+    const t0 = performance.now();
+    const dur = 760;
+    pie.sweep = 0;
+    const step = (now) => {
+      if (pies[kind] !== pie) return;
+      const p = Math.min(1, (now - t0) / dur);
+      pie.sweep = 1 - Math.pow(1 - p, 3);
+      drawPie(kind);
+      pie.raf = p < 1 ? requestAnimationFrame(step) : 0;
+    };
+    pie.raf = requestAnimationFrame(step);
+  }
+
+  function pieIndexAt(kind, e) {
+    const pie = pies[kind];
+    if (!pie || !pie.total) return -1;
+    const canvas = $(`#pie-${kind} .pie-canvas`);
+    const rect = canvas.getBoundingClientRect();
+    const N = canvas.width;
+    const x = ((e.clientX - rect.left) / rect.width) * N;
+    const y = ((e.clientY - rect.top) / rect.height) * N;
+    const { c, cy, R } = pieGeometry(N);
+    const dx = x - c;
+    const dy = y - cy;
+    if (Math.hypot(dx, dy) > R + 2) return -1;
+    let a = Math.atan2(dx, -dy);
+    if (a < 0) a += Math.PI * 2;
+    const i = pie.slices.findIndex((s) => a < s.end);
+    return i < 0 ? pie.slices.length - 1 : i;
+  }
+  function setPieActive(kind, i, { tip = false } = {}) {
+    const pie = pies[kind];
+    if (!pie || !pie.total) return;
+    if (pie.active !== i) {
+      pie.active = i;
+      if (!pie.raf) drawPie(kind);
+    }
+    for (const row of $$(`#pie-${kind} .lg-row`)) row.classList.toggle('is-active', +row.dataset.i === i);
+    if (tip && i >= 0) showTip(kind, i);
+    else hideTip(kind);
+  }
+  function showTip(kind, i) {
+    const pie = pies[kind];
+    const s = pie.slices[i];
+    const wrap = $(`#pie-${kind} .pie-wrap`);
+    const tip = $('.pie-tip', wrap);
+    tip.textContent = '';
+    const b = document.createElement('b');
+    b.textContent = `${fmt(s.sum)}원 · ${pct(s.sum, pie.total)}`;
+    tip.append(b, s.other ? `그 외 ${s.other.length}개 카테고리` : `${s.cat.name} · ${s.count}건`);
+    tip.hidden = false;
+    const size = wrap.clientWidth;
+    const mid = (s.start + s.end) / 2;
+    const half = tip.offsetWidth / 2;
+    let x = size / 2 + Math.sin(mid) * size * 0.3;
+    x = Math.min(size + 12 - half, Math.max(half - 12, x));
+    const y = size / 2 - Math.cos(mid) * size * 0.3;
+    tip.style.left = `${x}px`;
+    tip.style.top = `${y}px`;
+  }
+  function hideTip(kind) {
+    const tip = $(`#pie-${kind} .pie-tip`);
+    if (tip) tip.hidden = true;
+  }
+
+  function renderPies({ animate = false } = {}) {
+    for (const kind of KINDS) renderPie(kind, { animate: animate && !$(`#pie-${kind}`).hidden });
+    autoFoldLegend();
+  }
+
+  /* '그 외'에 묶인 카테고리 목록을 펼치거나 접습니다 */
+  function setOtherOpen(kind, open, { animate = false } = {}) {
+    const more = $(`#pie-${kind} .lg-more`);
+    const sub = $(`#lg-sub-${kind}`);
+    if (!more || !sub) return;
+    more.setAttribute('aria-expanded', String(open));
+    more.textContent = open ? '접기' : more.dataset.closed;
+    sub.hidden = !open;
+    if (open && animate) {
+      M.animate(sub, [{ opacity: 0, transform: 'translateY(-6px)' }, { opacity: 1, transform: 'none' }], {
+        duration: 360,
+        easing: M.EASE_OUT,
+      });
+    }
+  }
+  /* 넓은 화면에서 원그래프 칸이 넘치면, 사용자가 직접 고르지 않은 '그 외' 목록부터 접습니다 */
+  function autoFoldLegend() {
+    if (!wide || state.screen !== 'app') return;
+    const card = $('#pie-card .card-body');
+    const auto = KINDS.filter((k) => state.otherOpen[k] === null && $(`#pie-${k} .lg-more`));
+    auto.forEach((k) => setOtherOpen(k, true));
+    for (const k of auto) {
+      if (card.scrollHeight <= card.clientHeight + 1) break;
+      setOtherOpen(k, false);
+    }
+  }
+
+  function renderStats({ animate = false, dir = 0 } = {}) {
+    renderCalendar({ animate, dir });
+    renderPies({ animate });
   }
 
   /* ───────── 탭 ───────── */
@@ -497,13 +1231,28 @@
     ts.setAttribute('aria-selected', String(!isList));
     tl.tabIndex = isList ? 0 : -1;
     ts.tabIndex = isList ? -1 : 0;
-    $('#panel-list').hidden = !isList;
-    $('#panel-stats').hidden = isList;
+    const list = $('#panel-list');
+    const stats = $('#panel-stats');
+    list.hidden = !wide && !isList;
+    stats.hidden = !wide && isList;
+    // 넓은 화면에는 탭이 없으니 각 칸을 제목 붙은 영역으로 둡니다
+    if (wide) {
+      list.removeAttribute('role');
+      list.setAttribute('aria-labelledby', 'list-title');
+      stats.removeAttribute('role');
+      stats.removeAttribute('aria-labelledby');
+    } else {
+      list.setAttribute('role', 'tabpanel');
+      list.setAttribute('aria-labelledby', 'tab-list');
+      stats.setAttribute('role', 'tabpanel');
+      stats.setAttribute('aria-labelledby', 'tab-stats');
+    }
   }
   function setTab(tab, { focus = false } = {}) {
     if (state.tab === tab) return;
     state.tab = tab;
     paintTabs();
+    if (wide) return;
     const isList = tab === 'list';
     if (focus) (isList ? $('#tab-list') : $('#tab-stats')).focus();
     const show = isList ? $('#panel-list') : $('#panel-stats');
@@ -511,16 +1260,25 @@
       duration: M.SPRING_SOFT.duration,
       easing: M.SPRING_SOFT.easing,
     });
-    if (isList) cascade($('#list'), 0);
-    else renderStats({ animate: true });
+    if (isList) {
+      cascade($('#list'), 0);
+      updateFades();
+    } else renderStats({ animate: true });
   }
 
-  function setStatKind(kind) {
-    state.statKind = kind;
+  function paintStatKind() {
+    const kind = state.statKind;
     const seg = $('.seg');
     seg.dataset.kind = kind;
     seg.style.setProperty('--seg', kind === 'expense' ? 0 : 1);
-    renderStats({ animate: true });
+    const radio = $(`input[name="stat-kind"][value="${kind}"]`);
+    if (radio) radio.checked = true;
+    for (const k of KINDS) $(`#pie-${k}`).hidden = !wide && k !== kind;
+  }
+  function setStatKind(kind) {
+    state.statKind = kind;
+    paintStatKind();
+    renderPie(kind, { animate: true });
   }
 
   /* ───────── 달 이동 ───────── */
@@ -545,18 +1303,28 @@
     watchMonth(y, m);
     renderMonthLabel(dir);
     renderSummary();
-    const panel = state.tab === 'list' ? $('#panel-list .panel-inner') : $('#bars');
+    const listOn = listVisible();
+    const statsOn = statsVisible();
+    const targets = [];
+    if (listOn) targets.push($('#list'));
+    if (statsOn) targets.push($('#cal-grid'), ...$$('.pie-block:not([hidden]) .pie-body'));
+    $$('.card-body').forEach((b) => (b.scrollTop = 0));
     const redraw = () => {
-      renderList({ enterDir: state.tab === 'list' ? dir : null });
-      renderStats({ animate: state.tab === 'stats' });
+      $('#list-scroll').scrollTop = 0;
+      renderList({ enterDir: listOn ? dir : null });
+      renderStats({ animate: statsOn, dir });
     };
-    const out = M.reduced()
-      ? null
-      : M.animate(panel, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: `translateX(${-dir * 28}px)` }], {
-          duration: 150,
-          easing: M.EASE_IN,
-        });
-    if (out) out.onfinish = redraw;
+    const outs = M.reduced()
+      ? []
+      : targets
+          .map((el) =>
+            M.animate(el, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: `translateX(${-dir * 28}px)` }], {
+              duration: 150,
+              easing: M.EASE_IN,
+            })
+          )
+          .filter(Boolean);
+    if (outs.length) outs[0].onfinish = redraw;
     else redraw();
     refreshTalk();
   }
@@ -565,7 +1333,7 @@
   function arrive() {
     renderSummary({ animate: true });
     renderList({ enterDir: 0 });
-    renderStats({ animate: state.tab === 'stats' });
+    renderStats({ animate: statsVisible() });
     refreshTalk();
   }
 
@@ -585,6 +1353,9 @@
     renderList({ flip: true });
     renderSummary();
     renderStats({ animate: false });
+    // 다른 기기에서 첫 기록이 들어왔거나 모두 지워졌으면 토리의 말도 바꿉니다
+    const empty = !Store.month(state.y, state.m).length;
+    if (state.talk.empty !== null && empty !== state.talk.empty && !state.sheet.open) refreshTalk();
   }
 
   function onStoreChange(key) {
@@ -603,10 +1374,26 @@
       toast(denied ? '이 기록을 볼 권한이 없어요. 다시 로그인해 주세요.' : '기록을 불러오지 못했어요. 인터넷 연결을 확인해 주세요.', {
         icon: 'close',
       });
+    } else if (kind === 'totals') {
+      // 잔액 합계는 자주 다시 세므로 알림은 한 번만 띄웁니다
+      if (state.totalsErrShown) return;
+      state.totalsErrShown = true;
+      const noIndex = err && err.code === 'failed-precondition';
+      toast(
+        denied
+          ? '잔액을 계산할 권한이 없어요. 사이트 관리자에게 보안 규칙을 새로 게시해 달라고 알려 주세요.'
+          : noIndex
+            ? '잔액 계산에 필요한 색인이 아직 없어요. 사이트 관리자에게 README의 “색인 만들기”를 알려 주세요.'
+            : '잔액을 계산하지 못했어요. 인터넷 연결을 확인해 주세요.',
+        { icon: 'close', duration: 6000 }
+      );
     } else {
-      toast(denied ? '저장할 권한이 없어요. 다시 로그인해 주세요.' : '저장하지 못했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.', {
-        icon: 'close',
-      });
+      toast(
+        denied
+          ? '저장할 권한이 없어요. 다시 로그인해도 안 되면 사이트 관리자에게 알려 주세요.'
+          : '저장하지 못했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.',
+        { icon: 'close' }
+      );
       scheduleSync();
     }
   }
@@ -642,18 +1429,18 @@
     if (!entries.length) {
       lines.push(
         cur
-          ? '이번 달 기록은 아직 없어요. 아래 나뭇잎 버튼을 눌러 첫 기록을 남겨 봐요!'
-          : `${state.m}월에는 기록이 없어요. 날짜를 골라 지난 기록도 남길 수 있어요.`
+          ? wide
+            ? '이번 달 기록은 아직 없어요. 내역 칸의 기록하기 버튼으로 첫 기록을 남겨 봐요!'
+            : '이번 달 기록은 아직 없어요. 아래 나뭇잎 버튼을 눌러 첫 기록을 남겨 봐요!'
+          : `${state.m}월에는 기록이 없어요. 달력에서 날짜를 눌러 지난 기록도 남길 수 있어요.`
       );
     } else {
       lines.push(`${when} 수입은 ${fmt(s.income)}원, 지출은 ${fmt(s.expense)}원이에요.`);
       if (s.income && s.expense > s.income) {
         lines.push('지출이 수입보다 많아요. 겨울을 나려면 도토리를 조금 아껴 둬야 해요!');
       } else if (s.income) {
-        const pct = Math.round((s.expense / s.income) * 100);
-        lines.push(
-          pct <= 50 ? `수입의 ${pct}%만 썼어요. 알뜰하게 잘 모으고 있어요!` : `수입의 ${pct}%를 썼어요. 남은 날도 차근차근 가 봐요.`
-        );
+        const p = Math.round((s.expense / s.income) * 100);
+        lines.push(p <= 50 ? `수입의 ${p}%만 썼어요. 알뜰하게 잘 모으고 있어요!` : `수입의 ${p}%를 썼어요. 남은 날도 차근차근 가 봐요.`);
       }
       const top = Store.byCategory(state.y, state.m, 'expense')[0];
       if (top) {
@@ -665,6 +1452,13 @@
         const n = entries.filter((e) => e.date === Store.todayISO()).length;
         lines.push(n ? `오늘은 벌써 ${n}건을 기록했어요. 꼼꼼해요!` : '오늘 쓴 돈이 있다면 잊기 전에 적어 둬요.');
       }
+    }
+    const now = Store.current();
+    if (now !== null) {
+      lines.push(
+        now < 0 ? `지금 잔액은 마이너스 ${fmt(-now)}원이에요. 조금씩 채워 봐요!` : `처음 기록부터 이어서 센 지금 잔액은 ${fmt(now)}원이에요.`
+      );
+      if (!Store.opening) lines.push('실제 통장 잔액과 다르면 위의 ‘맞추기’를 눌러 한 번 맞춰 두세요.');
     }
     lines.push(greeting());
     return lines;
@@ -693,6 +1487,7 @@
   function refreshTalk(first) {
     state.talk.lines = buildLines();
     state.talk.idx = 0;
+    state.talk.empty = Store.ready(state.y, state.m) ? !Store.month(state.y, state.m).length : null;
     say(first || state.talk.lines[0]);
   }
   function nextLine() {
@@ -805,6 +1600,77 @@
       await state.cloud.signOut();
     } catch {
       toast('로그아웃하지 못했어요. 다시 시도해 주세요.', { icon: 'close' });
+    } finally {
+      btn.setAttribute('aria-busy', 'false');
+    }
+  }
+
+  /* ───────── 현재 잔액 맞추기 ─────────
+   * 지금 실제로 가진 돈을 적으면, 기록은 그대로 두고 '기록 전 잔액(시작 잔액)'을 거꾸로 계산해 저장합니다. */
+  function setAdjustSign(neg) {
+    const b = $('#adjust-sign');
+    b.setAttribute('aria-pressed', String(neg));
+    b.textContent = neg ? MINUS : '+';
+  }
+  function adjustValue() {
+    const digits = $('#adjust-amount').value.replace(/\D/g, '');
+    if (!digits) return null;
+    const v = Number(digits);
+    return $('#adjust-sign').getAttribute('aria-pressed') === 'true' ? -v : v;
+  }
+  function adjustError(text) {
+    const p = $('#adjust-error');
+    p.textContent = text || '';
+    p.hidden = !text;
+    if (text) shake($('#adjust-form'));
+  }
+  function openAdjust() {
+    const dlg = $('#adjust-dialog');
+    if (dlg.open || state.screen !== 'app') return;
+    toggleAccountMenu(false);
+    const cur = Store.current();
+    $('#adjust-calc').textContent = cur === null ? '계산 중…' : won(cur);
+    setAdjustSign(cur !== null && cur < 0);
+    $('#adjust-amount').value = cur ? fmt(Math.abs(cur)) : '';
+    adjustError('');
+    $('#adjust-save').setAttribute('aria-busy', 'false');
+    dlg.showModal();
+    syncScrollLock();
+    M.animate($('#adjust-form'), [{ opacity: 0, transform: 'translateY(28px) scale(.94)' }, { opacity: 1, transform: 'none' }], {
+      duration: M.SPRING.duration,
+      easing: M.SPRING.easing,
+    });
+    const input = $('#adjust-amount');
+    input.focus();
+    input.select();
+  }
+  async function submitAdjust(e) {
+    e.preventDefault();
+    const btn = $('#adjust-save');
+    if (btn.getAttribute('aria-busy') === 'true') return;
+    const v = adjustValue();
+    if (v === null) {
+      adjustError('지금 가진 금액을 적어 주세요.');
+      $('#adjust-amount').focus();
+      return;
+    }
+    adjustError('');
+    btn.setAttribute('aria-busy', 'true');
+    try {
+      await Store.setActualBalance(v);
+      $('#adjust-dialog').close();
+      toast(`현재 잔액을 ${won(v)}으로 맞췄어요.`, { icon: 'check' });
+      say(`좋아요! 지금 잔액은 ${won(v)}이에요. 앞으로의 기록은 여기서부터 이어서 셀게요.`, { hop: true });
+      M.FX.sparkles($('#now-val'), { count: 8 });
+    } catch (err) {
+      console.error('[가계부] 잔액 맞추기', err);
+      adjustError(
+        err && err.code === 'out-of-range'
+          ? '금액이 너무 커요. 다시 확인해 주세요.'
+          : err && err.code === 'permission-denied'
+            ? '저장할 권한이 없어요. 사이트 관리자에게 보안 규칙을 새로 게시해 달라고 알려 주세요.'
+            : '맞추지 못했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.'
+      );
     } finally {
       btn.setAttribute('aria-busy', 'false');
     }
@@ -982,6 +1848,8 @@
 
   function showAuth({ notice = null } = {}) {
     if (state.sheet.open) closeSheet({ restoreFocus: false });
+    if ($('#adjust-dialog').open) $('#adjust-dialog').close();
+    setListFull(false, { animate: false });
     Store.end();
     state.user = null;
     state.loaded.clear();
@@ -1009,17 +1877,25 @@
     state.y = today.getFullYear();
     state.m = today.getMonth() + 1;
     state.tab = 'list';
+    state.statKind = 'expense';
+    state.calFocus = null;
+    state.totalsErrShown = false;
+    state.otherOpen = { expense: null, income: null };
     prevSummary = { income: 0, expense: 0 };
+    prevCurrent = null;
     return go(
       'app',
       () => {
         updateAccount();
         paintTabs();
+        paintStatKind();
+        paintEmptyHint();
         odometer.set(0, { instant: true });
         $('#balance .sign').textContent = '';
         $('#sum-in').textContent = '0원';
         $('#sum-out').textContent = '0원';
         $('#meter-fill').style.setProperty('--ratio', 0);
+        $('#list-scroll').scrollTop = 0;
         renderMonthLabel(0);
         watchMonth(state.y, state.m);
         renderSummary();
@@ -1049,7 +1925,7 @@
     const viewed = monthIndex(state.y, state.m);
     const now = monthIndex(today.getFullYear(), today.getMonth() + 1);
     const day = viewed < now ? new Date(state.y, state.m, 0).getDate() : 1;
-    return `${state.y}-${String(state.m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    return dayISO(day);
   }
 
   function buildCategoryGrid(type, { animate = false } = {}) {
@@ -1143,19 +2019,26 @@
     if (p) p.hidden = true;
   }
 
+  /* 시트·크게 보기·잔액 맞추기 중 하나라도 열려 있으면 뒤 화면은 스크롤하지 않습니다 */
+  function syncScrollLock() {
+    const dlg = $('#adjust-dialog');
+    const lock = state.sheet.open || state.listFull || (dlg && dlg.open);
+    document.documentElement.style.overflow = lock ? 'hidden' : '';
+  }
   function lockPage(lock) {
     $('#page').inert = lock;
     $('.fab-wrap').inert = lock;
-    document.documentElement.style.overflow = lock ? 'hidden' : '';
+    syncScrollLock();
   }
 
-  function openSheet({ mode = 'add', entry = null, opener = null } = {}) {
+  function openSheet({ mode = 'add', entry = null, opener = null, date = null, from = null } = {}) {
     const sh = state.sheet;
     if (sh.open) return;
     sh.open = true;
     sh.mode = mode;
     sh.id = entry ? entry.id : null;
     sh.opener = opener;
+    sh.from = from;
     toggleAccountMenu(false);
 
     const layer = $('#sheet-layer');
@@ -1167,7 +2050,7 @@
     setType(entry ? entry.type : sh.lastType, { animate: false });
     selectCat(entry ? entry.cat : null);
     setAmount(entry ? entry.amount : 0, { animate: false });
-    $('#date').value = entry ? entry.date : defaultDate();
+    $('#date').value = entry ? entry.date : date || defaultDate();
     $('#memo').value = entry ? entry.memo : '';
     $('#sheet-title').textContent = mode === 'edit' ? '기록 고치기' : '새 기록';
     $('#save-btn .label-text').textContent = mode === 'edit' ? '고친 내용 저장' : '기록하기';
@@ -1179,7 +2062,7 @@
     $('#fab').classList.add('is-open');
     sheet.querySelector('.sheet-scroll').scrollTop = 0;
 
-    const r = (opener || $('#fab')).getBoundingClientRect();
+    const r = (opener || addButton()).getBoundingClientRect();
     const cx = r.left + r.width / 2;
     const cy = r.top + r.height / 2;
     const R = Math.hypot(Math.max(cx, innerWidth - cx), Math.max(cy, innerHeight - cy));
@@ -1247,7 +2130,7 @@
 
   function isVisible(el) {
     const r = el.getBoundingClientRect();
-    return r.bottom > 0 && r.top < innerHeight;
+    return r.bottom > 0 && r.top < innerHeight && r.width > 0;
   }
 
   function submitSheet() {
@@ -1274,6 +2157,7 @@
     const payload = { type: sh.type, cat: sh.cat, amount: sh.amount, date, memo: $('#memo').value };
     const fromRect = $('#save-btn').getBoundingClientRect();
     const mode = sh.mode;
+    const fromCalendar = sh.from === 'calendar';
     busy(1100);
     const entry = mode === 'edit' ? Store.update(sh.id, payload) : Store.add(payload);
     if (!entry) return;
@@ -1289,11 +2173,12 @@
       watchMonth(ey, em);
       renderMonthLabel(dir);
     }
-    if (state.tab !== 'list') setTab('list');
+    // 달력에서 연 기록은 달력에 그대로 머물고, 그 밖에는 내역으로 가서 새 기록을 보여 줍니다
+    if (state.tab !== 'list' && !fromCalendar) setTab('list');
 
     setTimeout(() => {
       renderList({ flip: !moved, enterDir: moved ? dir : null, fresh: entry.id });
-      renderStats({ animate: false });
+      renderStats({ animate: moved && statsVisible(), dir });
       const balance = $('#balance');
       const row = $(`.entry[data-id="${CSS.escape(entry.id)}"]`);
       if (entry.type === 'income' && isVisible(balance) && mode === 'add' && Store.ready(state.y, state.m)) {
@@ -1311,11 +2196,12 @@
           if (entry.type === 'expense' && mode === 'add') M.FX.coinBurst(balance, { count: 8 });
         }
       }
-      if (row) {
-        if (!isVisible(row)) row.scrollIntoView({ block: 'center', behavior: M.reduced() ? 'auto' : 'smooth' });
+      if (row && listVisible()) {
+        revealRow(row);
         setTimeout(() => M.FX.sparkles(row, { count: 8 }), 420);
         if (mode === 'edit') row.focus({ preventScroll: true });
       }
+      flashCalDay(entry.date);
     }, 170);
 
     const c = Store.category(entry.type, entry.cat);
@@ -1345,7 +2231,7 @@
       renderList({ flip: true });
       renderSummary();
       renderStats({ animate: false });
-      $('#fab').focus({ preventScroll: true });
+      addButton().focus({ preventScroll: true });
     };
     setTimeout(() => {
       if (row && isVisible(row)) {
@@ -1397,7 +2283,12 @@
   }
   function intro() {
     if (M.reduced()) return;
-    rise($$('#app > .hero, #app > .talk, #app > .tabs, #app > .panel:not([hidden])'));
+    const parts = [$('.hero'), $('#app > .talk')];
+    if (!wide) parts.push($('#view-tabs'));
+    if (!$('#panel-list').hidden) parts.push($('#panel-list'));
+    if (!$('#panel-stats').hidden) parts.push($('#cal-card'), $('#pie-card'));
+    rise(parts);
+    if (wide) rise([$('.month-bar')], 0);
     M.animate($('#fab'), [{ transform: 'scale(0) rotate(-200deg)' }, { transform: 'none' }], {
       duration: M.SPRING.duration + 100,
       easing: M.SPRING.easing,
@@ -1417,6 +2308,8 @@
     $('#theme-btn').addEventListener('click', toggleTheme);
     new MutationObserver(syncTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     mqDark.addEventListener('change', syncTheme);
+    $('#layout-btn').addEventListener('click', toggleLayout);
+    mqWide.addEventListener('change', () => applyLayout());
 
     $$('.nav-btn').forEach((b) => b.addEventListener('click', () => changeMonth(+b.dataset.dir)));
 
@@ -1442,15 +2335,111 @@
     $('#logout-btn').addEventListener('click', logout);
     document.addEventListener('pointerdown', (e) => {
       if (!$('#account-menu').hidden && !e.target.closest('#account')) toggleAccountMenu(false);
+      if (!e.target.closest('.pie-wrap, .legend')) KINDS.forEach((k) => setPieActive(k, -1));
     });
 
     // 기록 시트 열기
     $('#fab').addEventListener('click', (e) => openSheet({ mode: 'add', opener: e.currentTarget }));
+    $('#list-add').addEventListener('click', (e) => openSheet({ mode: 'add', opener: e.currentTarget }));
     $('#list').addEventListener('click', (e) => {
       const btn = e.target.closest('.entry');
       if (!btn) return;
       const entry = Store.get(btn.dataset.id);
       if (entry) openSheet({ mode: 'edit', entry, opener: btn });
+    });
+
+    // 내역 칸
+    $('#list-expand').addEventListener('click', () => setListFull(!state.listFull));
+    $('#list-scrim').addEventListener('click', () => setListFull(false));
+    let fadeTick = false;
+    $('#list-scroll').addEventListener(
+      'scroll',
+      () => {
+        if (fadeTick) return;
+        fadeTick = true;
+        requestAnimationFrame(() => {
+          fadeTick = false;
+          updateFades();
+        });
+      },
+      { passive: true }
+    );
+
+    // 달력
+    const cal = $('#cal-grid');
+    cal.addEventListener('click', (e) => {
+      const btn = e.target.closest('.cal-day');
+      if (!btn) return;
+      state.calFocus = btn.dataset.date;
+      for (const b of $$('.cal-day', cal)) b.tabIndex = b === btn ? 0 : -1;
+      if (!Store.ready(state.y, state.m)) return;
+      if (btn.classList.contains('has')) goToDay(btn.dataset.date);
+      else openSheet({ mode: 'add', opener: btn, date: btn.dataset.date, from: 'calendar' });
+    });
+    cal.addEventListener('keydown', (e) => {
+      const btn = e.target.closest('.cal-day');
+      if (!btn) return;
+      const d = +btn.dataset.day;
+      const days = new Date(state.y, state.m, 0).getDate();
+      const wd = new Date(state.y, state.m - 1, d).getDay();
+      const moves = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7, Home: -wd, End: 6 - wd };
+      if (!Object.prototype.hasOwnProperty.call(moves, e.key)) return;
+      e.preventDefault();
+      focusCalDay(Math.min(days, Math.max(1, d + moves[e.key])));
+    });
+
+    // 원그래프: 조각이나 범례에 올리면 그 조각이 살짝 튀어나옵니다
+    for (const kind of KINDS) {
+      const block = $(`#pie-${kind}`);
+      const canvas = $('.pie-canvas', block);
+      const onCanvas = (e) => setPieActive(kind, pieIndexAt(kind, e), { tip: true });
+      canvas.addEventListener('pointermove', onCanvas);
+      canvas.addEventListener('pointerdown', onCanvas);
+      canvas.addEventListener('pointerleave', (e) => {
+        if (e.pointerType === 'mouse') setPieActive(kind, -1);
+      });
+      const legend = $('.legend', block);
+      legend.addEventListener('pointerover', (e) => {
+        const row = e.target.closest('.lg-row');
+        if (row) setPieActive(kind, +row.dataset.i);
+      });
+      legend.addEventListener('pointerleave', () => setPieActive(kind, -1));
+      legend.addEventListener('click', (e) => {
+        const more = e.target.closest('.lg-more');
+        if (!more) return;
+        const open = more.getAttribute('aria-expanded') !== 'true';
+        state.otherOpen[kind] = open;
+        setOtherOpen(kind, open, { animate: true });
+      });
+    }
+
+    // 현재 잔액 맞추기
+    const dlg = $('#adjust-dialog');
+    $('#adjust-btn').addEventListener('click', openAdjust);
+    $('#adjust-form').addEventListener('submit', submitAdjust);
+    $$('[data-adjust-close]').forEach((b) => b.addEventListener('click', () => dlg.close()));
+    dlg.addEventListener('close', () => {
+      syncScrollLock();
+      if (state.screen === 'app') $('#adjust-btn').focus({ preventScroll: true });
+    });
+    // 바깥(어두운 부분)을 눌렀다 뗐을 때만 닫습니다 (입력칸에서 끌어 선택하다 바깥에서 놓은 경우는 제외)
+    let downOutside = false;
+    dlg.addEventListener('pointerdown', (e) => {
+      downOutside = e.target === dlg;
+    });
+    dlg.addEventListener('click', (e) => {
+      if (downOutside && e.target === dlg) dlg.close();
+    });
+    $('#adjust-sign').addEventListener('click', () => {
+      setAdjustSign($('#adjust-sign').getAttribute('aria-pressed') !== 'true');
+      adjustError('');
+    });
+    $('#adjust-amount').addEventListener('input', (e) => {
+      const el = e.target;
+      if (/^\s*[-−]/.test(el.value)) setAdjustSign(true);
+      const digits = el.value.replace(/\D/g, '').replace(/^0+(?=\d)/, '').slice(0, 11);
+      el.value = digits ? fmt(Number(digits)) : '';
+      adjustError('');
     });
 
     // 시트 안
@@ -1539,10 +2528,13 @@
     });
 
     document.addEventListener('keydown', (e) => {
-      if (e.key !== 'Escape') return;
+      if (e.key !== 'Escape' || dlg.open) return;
       if (state.sheet.open) {
         e.preventDefault();
         closeSheet();
+      } else if (state.listFull) {
+        e.preventDefault();
+        setListFull(false);
       } else if (!$('#account-menu').hidden) {
         toggleAccountMenu(false);
         $('#account-btn').focus();
@@ -1564,8 +2556,50 @@
       { passive: true }
     );
 
+    // 칸 크기가 바뀌면 달력 금액을 다시 맞추고 원그래프를 다시 그립니다
+    let sizeTick = false;
+    const onResize = () => {
+      if (sizeTick) return;
+      sizeTick = true;
+      requestAnimationFrame(() => {
+        sizeTick = false;
+        if (state.screen !== 'app') return;
+        fitCalendar();
+        for (const k of KINDS) {
+          const cv = $(`#pie-${k} .pie-canvas`);
+          if (cv.clientWidth && Math.max(24, Math.round(cv.clientWidth / 3)) !== cv.width) drawPie(k);
+        }
+        autoFoldLegend();
+        updateFades();
+      });
+    };
+    if (window.ResizeObserver) {
+      const ro = new window.ResizeObserver(onResize);
+      ro.observe($('#cal-grid'));
+      ro.observe($('#list-scroll'));
+      ro.observe($('#pie-card .card-body'));
+      $$('.pie-canvas').forEach((c) => ro.observe(c));
+    } else window.addEventListener('resize', onResize);
+    if (document.fonts) {
+      document.fonts.ready.then(onResize);
+      document.fonts.addEventListener('loadingdone', onResize);
+    }
+
+    // 다른 기기에서 지난 달 기록을 고쳤을 수도 있으니, 화면으로 돌아오거나 5분마다 잔액 합계를 다시 셉니다
+    const refreshTotals = () => {
+      if (state.screen === 'app' && !document.hidden) Store.refreshTotals();
+    };
+    document.addEventListener('visibilitychange', refreshTotals);
+    window.addEventListener('focus', refreshTotals);
+    window.setInterval(refreshTotals, 5 * 60 * 1000);
+
     Store.onChange(onStoreChange);
     Store.onError(onStoreError);
+    Store.onTotals(() => {
+      if (state.screen !== 'app') return;
+      paintBalances();
+      paintCurrent();
+    });
   }
 
   /* ───────── 시작 ───────── */
@@ -1594,6 +2628,9 @@
     M.setupLayer('ambient');
     M.setupLayer('fx');
     buildCategoryGrid('expense');
+    state.layoutChoice = readLayoutChoice();
+    document.documentElement.dataset.screen = state.screen;
+    applyLayout();
     bind();
     syncTheme();
     rise([$('.topbar')], 0);
